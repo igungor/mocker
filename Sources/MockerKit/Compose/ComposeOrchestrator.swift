@@ -205,14 +205,19 @@ public actor ComposeOrchestrator {
                 detach: detach, forceBuild: build, noBuild: noBuild
             )
             let containerName = "\(projectName)-\(service.name)-1"
+            // Give a starting container the names of the services started before it,
+            // which include its dependencies, so it can reach them at startup.
+            if let lines = Self.hostnameLines(for: info, after: startedContainers) {
+                await appendHosts(lines, to: info.id)
+            }
             startedContainers.append((serviceName: serviceName, info: info))
             events.append(.containerStarted(containerName))
         }
 
-        // Inject inter-service hostnames into /etc/hosts of each container.
-        // All containers share the same vmnet subnet and can reach each other by IP.
-        // We add /etc/hosts entries so service names resolve (e.g. "db" → 192.168.64.6).
-        await injectServiceHostnames(startedContainers)
+        // Then give each container the names of the services started after it.
+        for write in Self.remainingHostnameWrites(startedContainers) {
+            await appendHosts(write.lines, to: write.containerID)
+        }
 
         return events
     }
@@ -495,27 +500,57 @@ public actor ComposeOrchestrator {
                 hostsContent += "\(svc.info.networkAddress) \(svc.serviceName)\n"
             }
 
-            // Use tee -a to append to /etc/hosts without shell interpolation
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: CLIResolver.resolve())
-            process.arguments = Self.hostsAppendArguments(containerID: target.info.id)
-            let inputPipe = Pipe()
-            process.standardInput = inputPipe
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            do {
-                try process.run()
-                inputPipe.fileHandleForWriting.write(Data(hostsContent.utf8))
-                inputPipe.fileHandleForWriting.closeFile()
-                // Async-safe: use terminationHandler instead of blocking waitUntilExit
-                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    process.terminationHandler = { _ in
-                        continuation.resume()
-                    }
-                }
-            } catch {
-                // Silently ignore if container doesn't support exec (e.g. no tee)
+            await appendHosts(hostsContent, to: target.info.id)
+        }
+    }
+
+    /// /etc/hosts lines for a container that just started: the services started
+    /// before it. Nil when there is nothing to write.
+    nonisolated static func hostnameLines(
+        for new: ContainerInfo,
+        after earlier: [(serviceName: String, info: ContainerInfo)]
+    ) -> String? {
+        let others = earlier.filter { !$0.info.networkAddress.isEmpty }
+        guard !new.networkAddress.isEmpty, !others.isEmpty else { return nil }
+        return others.map { "\($0.info.networkAddress) \($0.serviceName)\n" }.joined()
+    }
+
+    /// Once every container has started, the /etc/hosts lines each one still
+    /// needs: the services started after it.
+    nonisolated static func remainingHostnameWrites(
+        _ started: [(serviceName: String, info: ContainerInfo)]
+    ) -> [(containerID: String, lines: String)] {
+        started.indices.compactMap { index in
+            let container = started[index].info
+            guard let lines = hostnameLines(for: container, after: Array(started[(index + 1)...])) else {
+                return nil
             }
+            return (containerID: container.id, lines: lines)
+        }
+    }
+
+    /// Append `lines` to a container's /etc/hosts.
+    private func appendHosts(_ lines: String, to containerID: String) async {
+        // Use tee -a to append to /etc/hosts without shell interpolation
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: CLIResolver.resolve())
+        process.arguments = Self.hostsAppendArguments(containerID: containerID)
+        let inputPipe = Pipe()
+        process.standardInput = inputPipe
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            inputPipe.fileHandleForWriting.write(Data(lines.utf8))
+            inputPipe.fileHandleForWriting.closeFile()
+            // Async-safe: use terminationHandler instead of blocking waitUntilExit
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                process.terminationHandler = { _ in
+                    continuation.resume()
+                }
+            }
+        } catch {
+            // Silently ignore if container doesn't support exec (e.g. no tee)
         }
     }
 

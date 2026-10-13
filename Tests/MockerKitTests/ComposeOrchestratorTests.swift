@@ -165,6 +165,33 @@ struct ComposeOrchestratorTests {
         #expect(args == ["exec", "-i", "--user", "0", "proj-web-1", "tee", "-a", "--", "/etc/hosts"])
     }
 
+    private static func container(_ id: String, address: String) -> ContainerInfo {
+        ContainerInfo(id: id, name: id, image: "img", state: .running, status: "Up", created: Date(), networkAddress: address)
+    }
+
+    @Test("A starting container gets the names of the services started before it")
+    func hostnameLinesForStartingContainer() {
+        let db = (serviceName: "db", info: Self.container("p-db-1", address: "10.0.0.2"))
+        let cache = (serviceName: "cache", info: Self.container("p-cache-1", address: "10.0.0.3"))
+        let web = Self.container("p-web-1", address: "10.0.0.4")
+
+        #expect(ComposeOrchestrator.hostnameLines(for: web, after: [db, cache]) == "10.0.0.2 db\n10.0.0.3 cache\n")
+        #expect(ComposeOrchestrator.hostnameLines(for: web, after: []) == nil)
+        #expect(ComposeOrchestrator.hostnameLines(for: Self.container("p-x-1", address: ""), after: [db]) == nil)
+    }
+
+    @Test("Once all are up, each container gets the names of the services started after it")
+    func remainingHostnameWritesAfterUp() {
+        let db = (serviceName: "db", info: Self.container("p-db-1", address: "10.0.0.2"))
+        let cache = (serviceName: "cache", info: Self.container("p-cache-1", address: "10.0.0.3"))
+        let web = (serviceName: "web", info: Self.container("p-web-1", address: "10.0.0.4"))
+
+        let writes = ComposeOrchestrator.remainingHostnameWrites([db, cache, web])
+
+        #expect(writes.map(\.containerID) == ["p-db-1", "p-cache-1"])
+        #expect(writes.map(\.lines) == ["10.0.0.3 cache\n10.0.0.4 web\n", "10.0.0.4 web\n"])
+    }
+
     // MARK: - Entrypoint resolution (compose `entrypoint:` support)
 
     @Test("Empty entrypoint leaves command untouched")
