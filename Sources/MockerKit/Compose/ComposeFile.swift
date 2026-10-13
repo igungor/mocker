@@ -436,6 +436,43 @@ public struct ComposeFile: Sendable {
         return order
     }
 
+    /// The services Compose enables for `activeProfiles`: those without `profiles` and
+    /// those with an active one, where `*` activates all. Each targeted service also
+    /// activates its own profiles. As in compose-go, depending on a service that ends
+    /// up disabled is an error.
+    public func enablingProfiles(_ activeProfiles: [String], targets: [String] = []) throws -> ComposeFile {
+        let active = activeProfiles + targets.flatMap { services[$0]?.profiles ?? [] }
+
+        var enabled = self
+        enabled.services = services.filter { Self.matchesProfiles($0.value.profiles, active) }
+        for service in enabled.services.values.sorted(by: { $0.name < $1.name }) {
+            for dependency in service.dependsOn.sorted() where enabled.services[dependency] == nil {
+                throw MockerError.composeParseError(
+                    "service \"\(service.name)\" depends on undefined service \"\(dependency)\": invalid compose project"
+                )
+            }
+        }
+        return enabled
+    }
+
+    static func matchesProfiles(_ declared: [String], _ active: [String]) -> Bool {
+        declared.isEmpty || active.contains("*") || declared.contains { active.contains($0) }
+    }
+
+    /// The active profiles: `--profile` flags, or else `COMPOSE_PROFILES` from the
+    /// environment or the project's `.env`, comma-separated.
+    public static func activeProfiles(
+        flags: [String],
+        projectDir: URL,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String] {
+        guard flags.isEmpty else { return flags }
+        let value = environment["COMPOSE_PROFILES"]
+            ?? loadDotEnv(from: projectDir.appendingPathComponent(".env").path)["COMPOSE_PROFILES"]
+            ?? ""
+        return value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
     /// Return a new ComposeFile containing only the requested services
     /// and their transitive dependencies.
     public func filtering(services requested: [String]) -> ComposeFile {
@@ -535,6 +572,8 @@ public struct ComposeService: Sendable {
     public var labels: [String: String]
     public var hostname: String?
     public var workingDir: String?
+    /// `profiles:`: the service is only enabled when one of them is active.
+    public var profiles: [String] = []
     /// `condition` per dependency, from the long `depends_on` form.
     public var dependsOnConditions: [String: String] = [:]
     public var healthcheck: HealthCheck? = nil
@@ -653,6 +692,7 @@ public struct ComposeService: Sendable {
             labels: labels,
             hostname: dict["hostname"] as? String,
             workingDir: dict["working_dir"] as? String,
+            profiles: (dict["profiles"] as? [Any])?.map { "\($0)" } ?? [],
             dependsOnConditions: parseDependsOnConditions(dict["depends_on"]),
             healthcheck: HealthCheck.parse(dict["healthcheck"]),
             platform: dict["platform"] as? String,
@@ -694,6 +734,7 @@ public struct ComposeService: Sendable {
             labels: labels.merging(other.labels) { _, new in new },
             hostname: other.hostname ?? hostname,
             workingDir: other.workingDir ?? workingDir,
+            profiles: other.profiles.isEmpty ? profiles : other.profiles,
             dependsOnConditions: other.dependsOn.isEmpty ? dependsOnConditions : other.dependsOnConditions,
             healthcheck: other.healthcheck ?? healthcheck,
             platform: other.platform ?? platform,
