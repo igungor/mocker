@@ -30,12 +30,13 @@ jobs:
         id: swift
         run: echo "hash=$(swift --version 2>&1 | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
-      # Fetching and compiling the dependencies is most of a cold build.
-      - name: Cache build
-        uses: actions/cache@v4
+      # Fetching and compiling the dependencies is most of a cold build. Only main
+      # saves a cache, so it follows main and pull requests don't fill the 10 GB.
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
         with:
           path: .build
-          key: build-${{ runner.os }}-${{ steps.swift.outputs.hash }}-${{ hashFiles('Package.resolved') }}
+          key: build-${{ runner.os }}-${{ steps.swift.outputs.hash }}-${{ github.sha }}
           restore-keys: build-${{ runner.os }}-${{ steps.swift.outputs.hash }}-
 
       - name: Build
@@ -43,3 +44,10 @@ jobs:
 
       - name: Test
         run: swift test --skip-build
+
+      - name: Save build cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: .build
+          key: build-${{ runner.os }}-${{ steps.swift.outputs.hash }}-${{ github.sha }}
