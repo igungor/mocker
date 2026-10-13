@@ -332,6 +332,8 @@ public actor ComposeOrchestrator {
             }
         }
 
+        try? FileManager.default.removeItem(at: configsDirectory)
+
         return events
     }
 
@@ -828,7 +830,7 @@ public actor ComposeOrchestrator {
             namedVolumeSources: composeFile.volumes.mapValues {
                 try volumeManager.composeSource($0.runtimeName(projectName: projectName))
             }
-        )
+        ) + configMounts(for: service, composeFile: composeFile)
 
         // Docker's exec model concatenates entrypoint + command into one argv.
         // Apple's `container` CLI can only override the executable
@@ -873,6 +875,61 @@ public actor ComposeOrchestrator {
         )
 
         return config
+    }
+
+    /// Where `content` and `environment` configs are written for the runtime to mount.
+    nonisolated var configsDirectory: URL {
+        URL(fileURLWithPath: MockerConfig().dataRoot)
+            .appendingPathComponent("configs", isDirectory: true)
+            .appendingPathComponent(projectName, isDirectory: true)
+    }
+
+    /// `configs:` become read-only file mounts, as in Docker Compose without Swarm. A
+    /// `file` config mounts that file. Docker copies `content` and `environment` configs
+    /// into the container; here they are written to a file first, with the mode Docker
+    /// gives them. Errors match Docker Compose's.
+    func configMounts(for service: ComposeService, composeFile: ComposeFile) throws -> [VolumeMount] {
+        try service.configs.map { reference in
+            guard let config = composeFile.configs[reference.source] else {
+                throw MockerError.composeParseError(
+                    "service \"\(service.name)\" refers to undefined config \(reference.source): invalid compose project")
+            }
+
+            let name = config.runtimeName(key: reference.source, projectName: projectName)
+            guard !config.external else {
+                throw MockerError.operationFailed("unsupported external config \(name)")
+            }
+
+            if let file = config.file {
+                let source = URL(fileURLWithPath: file, relativeTo: projectDir).standardized.path
+                return VolumeMount(source: source, destination: reference.containerPath, readOnly: true)
+            }
+
+            guard let content = config.content else {
+                throw MockerError.operationFailed(config.environment.map {
+                    "environment variable \"\($0)\" required by config \"\(name)\" is not set"
+                } ?? "config \"\(name)\" has no file, content or environment")
+            }
+
+            let file = try writeConfig(content, service: service.name, key: reference.source, mode: reference.mode ?? 0o444)
+            return VolumeMount(source: file.path, destination: reference.containerPath, readOnly: true)
+        }
+    }
+
+    private func writeConfig(_ content: String, service: String, key: String, mode: Int) throws -> URL {
+        guard !key.contains("/"), key != ".", key != ".." else {
+            throw MockerError.composeParseError("invalid config name: \(key)")
+        }
+
+        let directory = configsDirectory.appendingPathComponent(service, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        // The previous write is read-only, so replace it rather than write over it.
+        let file = directory.appendingPathComponent(key)
+        try? FileManager.default.removeItem(at: file)
+        try Data(content.utf8).write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: file.path)
+        return file
     }
 
     /// Resolve volume spec strings from a compose service into `VolumeMount` values.

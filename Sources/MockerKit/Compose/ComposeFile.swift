@@ -7,6 +7,7 @@ public struct ComposeFile: Sendable {
     public var services: [String: ComposeService]
     public var networks: [String: ComposeNetwork]
     public var volumes: [String: ComposeVolume]
+    public var configs: [String: ComposeFileObject] = [:]
     /// Top-level `name:` key — one of the project-name sources (see `resolveProjectName`).
     public var name: String?
     /// Set by `filtering(services:)`, so a subset (`up web`) still knows which volumes the
@@ -154,7 +155,14 @@ public struct ComposeFile: Sendable {
         guard let dict = try Yams.load(yaml: substituted) as? [String: Any] else {
             throw MockerError.composeParseError("Invalid YAML structure")
         }
-        let own = try parse(dict)
+        var own = try parse(dict)
+
+        // An `environment:` config takes its content from the same variables `${VAR}` sees.
+        let environment = interpolationEnvironment(dotEnv: dotEnv, resolved: variables)
+        for (key, config) in own.configs {
+            guard let variable = config.environment else { continue }
+            own.configs[key]?.content = environment[variable]
+        }
 
         guard let includes = try parseIncludes(dict["include"]), !includes.isEmpty else {
             return own
@@ -273,6 +281,10 @@ public struct ComposeFile: Sendable {
             build.context = dir.appendingPathComponent(build.context).standardized.path
             services[name]?.build = build
         }
+        for (key, config) in configs {
+            guard let file = config.file, !file.hasPrefix("/") else { continue }
+            configs[key]?.file = dir.appendingPathComponent(file).standardized.path
+        }
     }
 
     /// Absolutize the source of a `source:target[:mode]` spec when it is a relative
@@ -309,6 +321,16 @@ public struct ComposeFile: Sendable {
         return env
     }
 
+    /// .env is the weakest, then the shell, then whatever the caller resolved.
+    private static func interpolationEnvironment(
+        dotEnv: [String: String],
+        resolved: [String: String]
+    ) -> [String: String] {
+        dotEnv
+            .merging(ProcessInfo.processInfo.environment) { _, new in new }
+            .merging(resolved) { _, new in new }
+    }
+
     /// Substitute ${VAR}, ${VAR:-default}, and $VAR patterns using env + dotEnv.
     /// - Parameter resolved: values the caller worked out itself (the project name), which
     ///   outrank both `.env` and the environment because they are the effective values.
@@ -317,11 +339,7 @@ public struct ComposeFile: Sendable {
         dotEnv: [String: String],
         resolved: [String: String] = [:]
     ) -> String {
-        let processEnv = ProcessInfo.processInfo.environment
-        // .env is the weakest, then the shell, then whatever the caller resolved.
-        let env = dotEnv
-            .merging(processEnv) { _, new in new }
-            .merging(resolved) { _, new in new }
+        let env = interpolationEnvironment(dotEnv: dotEnv, resolved: resolved)
 
         var result = yaml
         // Match $$ (an escaped, literal $) and ${VAR:-default}, ${VAR-default}, ${VAR}.
@@ -363,10 +381,25 @@ public struct ComposeFile: Sendable {
         let networks = parseNetworks(dict["networks"] as? [String: Any] ?? [:])
         let volumes = parseVolumes(dict["volumes"] as? [String: Any] ?? [:])
 
-        return ComposeFile(
+        var file = ComposeFile(
             services: services, networks: networks, volumes: volumes,
             name: dict["name"] as? String
         )
+        file.configs = parseConfigs(dict["configs"] as? [String: Any] ?? [:])
+        return file
+    }
+
+    private static func parseConfigs(_ dict: [String: Any]) -> [String: ComposeFileObject] {
+        dict.reduce(into: [:]) { configs, entry in
+            let config = entry.value as? [String: Any] ?? [:]
+            configs[entry.key] = ComposeFileObject(
+                file: config["file"] as? String,
+                content: config["content"] as? String,
+                environment: config["environment"] as? String,
+                external: config["external"] as? Bool ?? (config["external"] != nil),
+                customName: config["name"] as? String
+            )
+        }
     }
 
     private static func parseServices(_ dict: [String: Any]) throws -> [String: ComposeService] {
@@ -488,6 +521,7 @@ public struct ComposeFile: Sendable {
 
         let filteredServices = services.filter { included.contains($0.key) }
         var filtered = ComposeFile(services: filteredServices, networks: networks, volumes: volumes, name: self.name)
+        filtered.configs = configs
         filtered.projectSharedVolumes = sharedVolumeKeys
         return filtered
     }
@@ -530,6 +564,7 @@ public struct ComposeFile: Sendable {
             }
             result.networks.merge(overlay.networks) { _, new in new }
             result.volumes.merge(overlay.volumes) { _, new in new }
+            result.configs.merge(overlay.configs) { _, new in new }
             result.name = overlay.name ?? result.name
         }
         return result
@@ -572,6 +607,7 @@ public struct ComposeService: Sendable {
     public var labels: [String: String]
     public var hostname: String?
     public var workingDir: String?
+    public var configs: [ComposeFileReference] = []
     /// `profiles:`: the service is only enabled when one of them is active.
     public var profiles: [String] = []
     /// `condition` per dependency, from the long `depends_on` form.
@@ -596,7 +632,7 @@ public struct ComposeService: Sendable {
 
     private enum HashCodingKeys: String, CodingKey {
         case name, image, command, entrypoint, environment, ports, volumes, networks
-        case restart, labels, hostname, workingDir, platform
+        case restart, labels, hostname, workingDir, platform, configs
         case memLimit, cpus, memReservation, cpusReservation, memSwapLimit
         case shmSize, pidsLimit
         case restartPolicyDelay, restartPolicyMaxAttempts, restartPolicyWindow
@@ -692,6 +728,7 @@ public struct ComposeService: Sendable {
             labels: labels,
             hostname: dict["hostname"] as? String,
             workingDir: dict["working_dir"] as? String,
+            configs: ComposeFileReference.parseList(dict["configs"]),
             profiles: (dict["profiles"] as? [Any])?.map { "\($0)" } ?? [],
             dependsOnConditions: parseDependsOnConditions(dict["depends_on"]),
             healthcheck: HealthCheck.parse(dict["healthcheck"]),
@@ -734,6 +771,7 @@ public struct ComposeService: Sendable {
             labels: labels.merging(other.labels) { _, new in new },
             hostname: other.hostname ?? hostname,
             workingDir: other.workingDir ?? workingDir,
+            configs: other.configs.isEmpty ? configs : other.configs,
             profiles: other.profiles.isEmpty ? profiles : other.profiles,
             dependsOnConditions: other.dependsOn.isEmpty ? dependsOnConditions : other.dependsOnConditions,
             healthcheck: other.healthcheck ?? healthcheck,
@@ -922,6 +960,7 @@ extension ComposeService: Encodable {
         try c.encode(labels, forKey: .labels)
         try c.encodeIfPresent(hostname, forKey: .hostname)
         try c.encodeIfPresent(workingDir, forKey: .workingDir)
+        if !configs.isEmpty { try c.encode(configs, forKey: .configs) }
         try c.encodeIfPresent(platform, forKey: .platform)
         try c.encodeIfPresent(memLimit, forKey: .memLimit)
         try c.encodeIfPresent(cpus, forKey: .cpus)
@@ -1022,5 +1061,71 @@ public struct ComposeVolume: Sendable {
     public func runtimeName(projectName: String) -> String {
         if let customName { return customName }
         return external ? name : "\(projectName)-\(name)"
+    }
+}
+
+/// A top-level `configs:` entry, compose-go's `FileObjectConfig`. Exactly one source is set: `file`, `content`, or
+/// `environment`, whose value is resolved into `content` at load time.
+public struct ComposeFileObject: Sendable, Equatable {
+    public var file: String?
+    public var content: String?
+    public var environment: String?
+    public var external: Bool
+    public var customName: String?
+
+    public init(
+        file: String? = nil,
+        content: String? = nil,
+        environment: String? = nil,
+        external: Bool = false,
+        customName: String? = nil
+    ) {
+        self.file = file
+        self.content = content
+        self.environment = environment
+        self.external = external
+        self.customName = customName
+    }
+
+    /// The name Compose gives the config: `name:`, the key for an external
+    /// config, `<project>_<key>` otherwise.
+    public func runtimeName(key: String, projectName: String) -> String {
+        if let customName { return customName }
+        return external ? key : "\(projectName)_\(key)"
+    }
+}
+
+/// A service's `configs:` entry, compose-go's `FileReferenceConfig`, in its short
+/// (`- name`) or long form.
+public struct ComposeFileReference: Sendable, Equatable, Encodable {
+    public var source: String
+    public var target: String?
+    public var mode: Int?
+
+    public init(source: String, target: String? = nil, mode: Int? = nil) {
+        self.source = source
+        self.target = target
+        self.mode = mode
+    }
+
+    /// Where the config appears in the container: `/<source>` by default, and a
+    /// relative target is taken from `/`.
+    public var containerPath: String {
+        guard let target, !target.isEmpty else { return "/\(source)" }
+        return target.hasPrefix("/") ? target : "/\(target)"
+    }
+
+    static func parseList(_ value: Any?) -> [ComposeFileReference] {
+        (value as? [Any] ?? []).compactMap { item in
+            if let source = item as? String {
+                return ComposeFileReference(source: source)
+            }
+            guard let dict = item as? [String: Any], let source = dict["source"] as? String else {
+                return nil
+            }
+            // compose-go reads a string mode as octal and an integer as is.
+            let mode = (dict["mode"] as? String).flatMap { Int($0, radix: 8) } ?? dict["mode"] as? Int
+            return ComposeFileReference(source: source, target: dict["target"] as? String, mode: mode)
+        }
     }
 }
