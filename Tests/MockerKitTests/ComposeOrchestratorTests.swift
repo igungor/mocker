@@ -192,6 +192,15 @@ struct ComposeOrchestratorTests {
         #expect(writes.map(\.lines) == ["10.0.0.3 cache\n10.0.0.4 web\n", "10.0.0.4 web\n"])
     }
 
+    @Test("Rewriting hostnames replaces a service's stale line and keeps the rest")
+    func hostsReplacingStaleLines() {
+        let current = "127.0.0.1 localhost\n10.0.0.9 p-client-1\n10.0.0.2 web\n10.0.0.3 db\n"
+
+        let updated = ComposeOrchestrator.hostsReplacing(["web", "db", "client"], in: current, with: "10.0.0.5 web\n10.0.0.3 db\n")
+
+        #expect(updated == "127.0.0.1 localhost\n10.0.0.9 p-client-1\n10.0.0.5 web\n10.0.0.3 db\n")
+    }
+
     // MARK: - Entrypoint resolution (compose `entrypoint:` support)
 
     @Test("Empty entrypoint leaves command untouched")
