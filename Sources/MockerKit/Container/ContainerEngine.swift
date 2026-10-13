@@ -76,7 +76,12 @@ public actor ContainerEngine {
     /// Run a container until it exits and return its exit code, which the runtime
     /// doesn't report otherwise: the container is created first, so it is stored like
     /// any other, then `container start --attach` exits with the container's own code.
-    public func runToCompletion(_ containerConfig: ContainerConfig) async throws -> Int32 {
+    /// - Parameter onStart: called once the container is running, e.g. to write
+    ///   hostnames into it. A container that exits before it is seen running skips it.
+    public func runToCompletion(
+        _ containerConfig: ContainerConfig,
+        onStart: @escaping @Sendable (ContainerInfo) async -> Void = { _ in }
+    ) async throws -> Int32 {
         let name = containerConfig.name ?? generateName()
         if let existing = try await store.findByName(name) {
             throw MockerError.containerAlreadyExists(existing.name)
@@ -89,7 +94,31 @@ public actor ContainerEngine {
         }
         try await store.save(try await fetchContainerInfo(id: name, name: name, config: containerConfig))
 
-        let (_, exitCode) = try await runCLI(["start", "--attach", name])
+        // `start --attach` blocks until the container exits, so watch for it to come
+        // up alongside.
+        let exitCode = try await withThrowingTaskGroup(of: Int32?.self) { group in
+            group.addTask { try await self.runCLI(["start", "--attach", name]).1 }
+            group.addTask {
+                while !Task.isCancelled {
+                    if let info = try? await self.fetchContainerInfo(id: name, name: name, config: containerConfig),
+                       info.state == .running, !info.networkAddress.isEmpty {
+                        await onStart(info)
+                        return nil
+                    }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                return nil
+            }
+
+            var exitCode: Int32 = 0
+            for try await result in group {
+                guard let code = result else { continue }
+                exitCode = code
+                group.cancelAll()
+            }
+            return exitCode
+        }
+
         if let finished = try? await fetchContainerInfo(id: name, name: name, config: containerConfig) {
             try await store.save(finished)
         }

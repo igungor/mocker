@@ -215,7 +215,16 @@ public actor ComposeOrchestrator {
             // exits, so its exit code is known when they need it.
             if awaited.contains(serviceName) {
                 let config = try await containerConfig(for: service, composeFile: composeFile, detach: detach, forceBuild: build, noBuild: noBuild)
-                completions[serviceName] = Task { try await engine.runToCompletion(config) }
+                // Like any service, it needs the names of the services started before it.
+                let lines = startedContainers
+                    .filter { !$0.info.networkAddress.isEmpty }
+                    .map { "\($0.info.networkAddress) \($0.serviceName)\n" }
+                    .joined()
+                completions[serviceName] = Task {
+                    try await engine.runToCompletion(config) { started in
+                        if !lines.isEmpty { await self.appendHosts(lines, to: started.id) }
+                    }
+                }
                 events.append(.containerStarted("\(projectName)-\(service.name)-1"))
                 continue
             }
@@ -566,27 +575,32 @@ public actor ComposeOrchestrator {
                 hostsContent += "\(svc.info.networkAddress) \(svc.serviceName)\n"
             }
 
-            // Use tee -a to append to /etc/hosts without shell interpolation
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: CLIResolver.resolve())
-            process.arguments = ["exec", "-i", target.info.id, "tee", "-a", "--", "/etc/hosts"]
-            let inputPipe = Pipe()
-            process.standardInput = inputPipe
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            do {
-                try process.run()
-                inputPipe.fileHandleForWriting.write(Data(hostsContent.utf8))
-                inputPipe.fileHandleForWriting.closeFile()
-                // Async-safe: use terminationHandler instead of blocking waitUntilExit
-                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    process.terminationHandler = { _ in
-                        continuation.resume()
-                    }
+            await appendHosts(hostsContent, to: target.info.id)
+        }
+    }
+
+    /// Append `lines` to a container's /etc/hosts.
+    private func appendHosts(_ lines: String, to containerID: String) async {
+        // Use tee -a to append to /etc/hosts without shell interpolation
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: CLIResolver.resolve())
+        process.arguments = ["exec", "-i", containerID, "tee", "-a", "--", "/etc/hosts"]
+        let inputPipe = Pipe()
+        process.standardInput = inputPipe
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            inputPipe.fileHandleForWriting.write(Data(lines.utf8))
+            inputPipe.fileHandleForWriting.closeFile()
+            // Async-safe: use terminationHandler instead of blocking waitUntilExit
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                process.terminationHandler = { _ in
+                    continuation.resume()
                 }
-            } catch {
-                // Silently ignore if container doesn't support exec (e.g. no tee)
             }
+        } catch {
+            // Silently ignore if container doesn't support exec (e.g. no tee)
         }
     }
 
