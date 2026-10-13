@@ -59,12 +59,18 @@ struct ComposeOptions: ParsableArguments {
     @Option(name: .customLong("project-directory"), help: "Specify an alternate working directory")
     var projectDirectory: String?
 
+    @Option(name: .customLong("profile"), parsing: .singleValue, help: "Specify a profile to enable (repeatable)")
+    var profiles: [String] = []
+
     /// Declared once here rather than per subcommand: every compose subcommand accepts
     /// `--dry-run`, and each mutating one returns early instead of touching the runtime.
     @Flag(name: .customLong("dry-run"), help: "Execute command in dry run mode")
     var dryRun = false
 
-    func loadCompose() throws -> (ComposeFile, projectName: String, projectDir: URL) {
+    /// - Parameters:
+    ///   - targets: the services the command names; they activate their own profiles.
+    ///   - applyProfiles: false to keep every service, whatever its profiles.
+    func loadCompose(targets: [String] = [], applyProfiles: Bool = true) throws -> (ComposeFile, projectName: String, projectDir: URL) {
         let cwd = FileManager.default.currentDirectoryPath
         let projectDir = ComposeFile.resolveProjectDirectory(
             explicit: projectDirectory, files: files, cwd: cwd
@@ -112,6 +118,11 @@ struct ComposeOptions: ParsableArguments {
             if !paths.contains("-") {
                 composeFile = try parse(withProjectName: project)
             }
+        }
+
+        if applyProfiles {
+            let active = ComposeFile.activeProfiles(flags: profiles, projectDir: projectDir)
+            composeFile = try composeFile.enablingProfiles(active, targets: targets)
         }
 
         return (composeFile, project, projectDir)
@@ -265,7 +276,7 @@ struct ComposeUp: AsyncParsableCommand {
     }
 
     func run() async throws {
-        var (composeFile, project, projectDir) = try options.loadCompose()
+        var (composeFile, project, projectDir) = try options.loadCompose(targets: services)
         let config = MockerConfig()
 
         // Filter to requested services only
@@ -419,7 +430,7 @@ struct ComposePS: AsyncParsableCommand {
     var services: [String] = []
 
     func run() async throws {
-        let (composeFile, project, projectDir) = try options.loadCompose()
+        let (composeFile, project, projectDir) = try options.loadCompose(targets: services)
         let config = MockerConfig()
         try composeFile.validateServiceNames(services)
 
@@ -511,7 +522,7 @@ struct ComposeLogs: AsyncParsableCommand {
     var until: String?
 
     func run() async throws {
-        let (composeFile, project, projectDir) = try options.loadCompose()
+        let (composeFile, project, projectDir) = try options.loadCompose(targets: service.map { [$0] } ?? [])
         let config = MockerConfig()
         if let service { try composeFile.validateServiceNames([service]) }
         let engine = try ContainerEngine(config: config)
@@ -563,7 +574,7 @@ struct ComposeKill: AsyncParsableCommand {
     var signal: String?
 
     func run() async throws {
-        let (composeFile, project, projectDir) = try options.loadCompose()
+        let (composeFile, project, projectDir) = try options.loadCompose(targets: service.map { [$0] } ?? [])
         let config = MockerConfig()
         if let service { try composeFile.validateServiceNames([service]) }
 
@@ -614,7 +625,7 @@ struct ComposeRestart: AsyncParsableCommand {
     var timeout: Int?
 
     func run() async throws {
-        let (composeFile, project, projectDir) = try options.loadCompose()
+        let (composeFile, project, projectDir) = try options.loadCompose(targets: service.map { [$0] } ?? [])
         let config = MockerConfig()
         if let service { try composeFile.validateServiceNames([service]) }
 
@@ -696,7 +707,7 @@ struct ComposeBuildCommand: AsyncParsableCommand {
     var services: [String] = []
 
     func run() async throws {
-        let (composeFile, project, projectDir) = try options.loadCompose()
+        let (composeFile, project, projectDir) = try options.loadCompose(targets: services)
         let config = MockerConfig()
         try composeFile.validateServiceNames(services)
 
@@ -774,7 +785,7 @@ struct ComposePull: AsyncParsableCommand {
     var services: [String] = []
 
     func run() async throws {
-        let (composeFile, _, _) = try options.loadCompose()
+        let (composeFile, _, _) = try options.loadCompose(targets: services)
         let config = MockerConfig()
         try composeFile.validateServiceNames(services)
 
@@ -829,7 +840,7 @@ struct ComposePush: AsyncParsableCommand {
     var services: [String] = []
 
     func run() async throws {
-        let (composeFile, _, _) = try options.loadCompose()
+        let (composeFile, _, _) = try options.loadCompose(targets: services)
         let config = MockerConfig()
         try composeFile.validateServiceNames(services)
 
@@ -912,7 +923,7 @@ struct ComposeExec: AsyncParsableCommand {
     }
 
     func run() async throws {
-        let (composeFile, project, _) = try options.loadCompose()
+        let (composeFile, project, _) = try options.loadCompose(targets: [service])
         let config = MockerConfig()
         try composeFile.validateServiceNames([service])
 
@@ -1029,7 +1040,7 @@ struct ComposeRun: AsyncParsableCommand {
     }
 
     func run() async throws {
-        let (composeFile, _, _) = try options.loadCompose()
+        let (composeFile, _, _) = try options.loadCompose(targets: [service])
         let config = MockerConfig()
 
         guard let svc = composeFile.services[service] else {
@@ -1093,7 +1104,7 @@ struct ComposeStop: AsyncParsableCommand {
     var services: [String] = []
 
     func run() async throws {
-        let (composeFile, project, projectDir) = try options.loadCompose()
+        let (composeFile, project, projectDir) = try options.loadCompose(targets: services)
         let config = MockerConfig()
         try composeFile.validateServiceNames(services)
 
@@ -1158,7 +1169,7 @@ struct ComposeStart: AsyncParsableCommand {
     var services: [String] = []
 
     func run() async throws {
-        let (composeFile, project, projectDir) = try options.loadCompose()
+        let (composeFile, project, projectDir) = try options.loadCompose(targets: services)
         let config = MockerConfig()
         try composeFile.validateServiceNames(services)
 
@@ -1216,7 +1227,7 @@ struct ComposeRm: AsyncParsableCommand {
     var services: [String] = []
 
     func run() async throws {
-        let (composeFile, project, projectDir) = try options.loadCompose()
+        let (composeFile, project, projectDir) = try options.loadCompose(targets: services)
         let config = MockerConfig()
         try composeFile.validateServiceNames(services)
 
@@ -1330,9 +1341,17 @@ struct ComposeConfig: AsyncParsableCommand {
     var variables = false
 
     func run() async throws {
-        let (composeFile, project, _) = try options.loadCompose()
+        // --profiles lists every profile the file declares, active or not.
+        let (composeFile, project, _) = try options.loadCompose(applyProfiles: !profiles)
 
         if quiet { return }
+
+        if profiles {
+            for name in Set(composeFile.services.values.flatMap(\.profiles)).sorted() {
+                print(name)
+            }
+            return
+        }
 
         if services {
             for name in composeFile.services.keys.sorted() {
@@ -1475,7 +1494,7 @@ struct ComposeCreate: AsyncParsableCommand {
 
     func run() async throws {
         // create is essentially up without starting — for now delegate to up
-        var (composeFile, project, projectDir) = try options.loadCompose()
+        var (composeFile, project, projectDir) = try options.loadCompose(targets: services)
         let config = MockerConfig()
 
         if !services.isEmpty {
@@ -1576,7 +1595,7 @@ struct ComposeTop: AsyncParsableCommand {
     var services: [String] = []
 
     func run() async throws {
-        let (composeFile, project, projectDir) = try options.loadCompose()
+        let (composeFile, project, projectDir) = try options.loadCompose(targets: services)
         let config = MockerConfig()
         try composeFile.validateServiceNames(services)
         let engine = try ContainerEngine(config: config)
@@ -1633,7 +1652,7 @@ struct ComposePort: AsyncParsableCommand {
     var `protocol`: String?
 
     func run() async throws {
-        let (composeFile, project, _) = try options.loadCompose()
+        let (composeFile, project, _) = try options.loadCompose(targets: [service])
         let config = MockerConfig()
         try composeFile.validateServiceNames([service])
         let engine = try ContainerEngine(config: config)
@@ -1660,7 +1679,7 @@ struct ComposePause: AsyncParsableCommand {
     var services: [String] = []
 
     func run() async throws {
-        let (composeFile, project, projectDir) = try options.loadCompose()
+        let (composeFile, project, projectDir) = try options.loadCompose(targets: services)
         let config = MockerConfig()
         try composeFile.validateServiceNames(services)
 
@@ -1707,7 +1726,7 @@ struct ComposeUnpause: AsyncParsableCommand {
     var services: [String] = []
 
     func run() async throws {
-        let (composeFile, project, projectDir) = try options.loadCompose()
+        let (composeFile, project, projectDir) = try options.loadCompose(targets: services)
         let config = MockerConfig()
         try composeFile.validateServiceNames(services)
 
@@ -1904,7 +1923,7 @@ struct ComposeAttach: AsyncParsableCommand {
     var service: String
 
     func run() async throws {
-        let (composeFile, project, _) = try options.loadCompose()
+        let (composeFile, project, _) = try options.loadCompose(targets: [service])
         let config = MockerConfig()
         try composeFile.validateServiceNames([service])
         let idx = index ?? 1

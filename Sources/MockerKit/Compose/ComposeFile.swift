@@ -340,8 +340,9 @@ public struct ComposeFile: Sendable {
         let env = interpolationEnvironment(dotEnv: dotEnv, resolved: resolved)
 
         var result = yaml
-        // Match ${VAR:-default}, ${VAR-default}, ${VAR}
-        let pattern = #"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}"#
+        // Match $$ (an escaped, literal $) and ${VAR:-default}, ${VAR-default}, ${VAR}.
+        // $$ comes first, so `$${VAR}` stays the literal text `${VAR}`.
+        let pattern = #"\$\$|\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return result }
 
         // Process from end to start to preserve offsets
@@ -349,6 +350,10 @@ public struct ComposeFile: Sendable {
         let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
         for match in matches.reversed() {
             guard let range = Range(match.range, in: result) else { continue }
+            if result[range] == "$$" {
+                result.replaceSubrange(range, with: "$")
+                continue
+            }
             let varName = match.numberOfRanges > 1 && match.range(at: 1).location != NSNotFound
                 ? ns.substring(with: match.range(at: 1)) : ""
             let defaultVal = match.numberOfRanges > 2 && match.range(at: 2).location != NSNotFound
@@ -463,6 +468,43 @@ public struct ComposeFile: Sendable {
         return order
     }
 
+    /// The services Compose enables for `activeProfiles`: those without `profiles` and
+    /// those with an active one, where `*` activates all. Each targeted service also
+    /// activates its own profiles. As in compose-go, depending on a service that ends
+    /// up disabled is an error.
+    public func enablingProfiles(_ activeProfiles: [String], targets: [String] = []) throws -> ComposeFile {
+        let active = activeProfiles + targets.flatMap { services[$0]?.profiles ?? [] }
+
+        var enabled = self
+        enabled.services = services.filter { Self.matchesProfiles($0.value.profiles, active) }
+        for service in enabled.services.values.sorted(by: { $0.name < $1.name }) {
+            for dependency in service.dependsOn.sorted() where enabled.services[dependency] == nil {
+                throw MockerError.composeParseError(
+                    "service \"\(service.name)\" depends on undefined service \"\(dependency)\": invalid compose project"
+                )
+            }
+        }
+        return enabled
+    }
+
+    static func matchesProfiles(_ declared: [String], _ active: [String]) -> Bool {
+        declared.isEmpty || active.contains("*") || declared.contains { active.contains($0) }
+    }
+
+    /// The active profiles: `--profile` flags, or else `COMPOSE_PROFILES` from the
+    /// environment or the project's `.env`, comma-separated.
+    public static func activeProfiles(
+        flags: [String],
+        projectDir: URL,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String] {
+        guard flags.isEmpty else { return flags }
+        let value = environment["COMPOSE_PROFILES"]
+            ?? loadDotEnv(from: projectDir.appendingPathComponent(".env").path)["COMPOSE_PROFILES"]
+            ?? ""
+        return value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
     /// Return a new ComposeFile containing only the requested services
     /// and their transitive dependencies.
     public func filtering(services requested: [String]) -> ComposeFile {
@@ -568,6 +610,13 @@ public struct ComposeService: Sendable {
     public var workingDir: String?
     public var configs: [ComposeFileReference] = []
     public var secrets: [ComposeFileReference] = []
+    /// `profiles:`: the service is only enabled when one of them is active.
+    public var profiles: [String] = []
+    /// `condition` per dependency, from the long `depends_on` form.
+    public var dependsOnConditions: [String: String] = [:]
+    public var healthcheck: HealthCheck? = nil
+    /// `platform:` (e.g. `linux/amd64`): the image platform to run.
+    public var platform: String? = nil
 
     // Resource limits — Docker Compose spec (legacy top-level + deploy.resources)
     public var memLimit: String?
@@ -585,7 +634,7 @@ public struct ComposeService: Sendable {
 
     private enum HashCodingKeys: String, CodingKey {
         case name, image, command, entrypoint, environment, ports, volumes, networks
-        case restart, labels, hostname, workingDir, configs, secrets
+        case restart, labels, hostname, workingDir, platform, configs, secrets
         case memLimit, cpus, memReservation, cpusReservation, memSwapLimit
         case shmSize, pidsLimit
         case restartPolicyDelay, restartPolicyMaxAttempts, restartPolicyWindow
@@ -683,6 +732,10 @@ public struct ComposeService: Sendable {
             workingDir: dict["working_dir"] as? String,
             configs: ComposeFileReference.parseList(dict["configs"]),
             secrets: ComposeFileReference.parseList(dict["secrets"]),
+            profiles: (dict["profiles"] as? [Any])?.map { "\($0)" } ?? [],
+            dependsOnConditions: parseDependsOnConditions(dict["depends_on"]),
+            healthcheck: HealthCheck.parse(dict["healthcheck"]),
+            platform: dict["platform"] as? String,
             memLimit: memLimit,
             cpus: cpus,
             memReservation: memReservation,
@@ -723,6 +776,10 @@ public struct ComposeService: Sendable {
             workingDir: other.workingDir ?? workingDir,
             configs: other.configs.isEmpty ? configs : other.configs,
             secrets: other.secrets.isEmpty ? secrets : other.secrets,
+            profiles: other.profiles.isEmpty ? profiles : other.profiles,
+            dependsOnConditions: other.dependsOn.isEmpty ? dependsOnConditions : other.dependsOnConditions,
+            healthcheck: other.healthcheck ?? healthcheck,
+            platform: other.platform ?? platform,
             memLimit: other.memLimit ?? memLimit,
             cpus: other.cpus ?? cpus,
             memReservation: other.memReservation ?? memReservation,
@@ -806,6 +863,11 @@ public struct ComposeService: Sendable {
             return Array(dict.keys)
         }
         return []
+    }
+
+    private static func parseDependsOnConditions(_ value: Any?) -> [String: String] {
+        guard let dict = value as? [String: Any] else { return [:] }
+        return dict.compactMapValues { ($0 as? [String: Any])?["condition"] as? String }
     }
 
     private static func parseCommand(_ value: Any?) -> [String] {
@@ -904,6 +966,7 @@ extension ComposeService: Encodable {
         try c.encodeIfPresent(workingDir, forKey: .workingDir)
         if !configs.isEmpty { try c.encode(configs, forKey: .configs) }
         if !secrets.isEmpty { try c.encode(secrets, forKey: .secrets) }
+        try c.encodeIfPresent(platform, forKey: .platform)
         try c.encodeIfPresent(memLimit, forKey: .memLimit)
         try c.encodeIfPresent(cpus, forKey: .cpus)
         try c.encodeIfPresent(memReservation, forKey: .memReservation)

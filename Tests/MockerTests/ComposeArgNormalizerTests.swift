@@ -22,6 +22,12 @@ struct ComposeArgNormalizerTests {
         #expect(out == ["compose", "up", "-p", "proj", "-d"])
     }
 
+    @Test("Relocates --profile before the subcommand")
+    func relocateProfile() {
+        let out = ComposeArgNormalizer.reorder(["compose", "--profile", "tools", "--profile", "debug", "up", "-d"])
+        #expect(out == ["compose", "up", "--profile", "tools", "--profile", "debug", "-d"])
+    }
+
     @Test("Keeps the equals-form as a single token")
     func equalsForm() {
         let out = ComposeArgNormalizer.reorder(["compose", "-f=a.yaml", "config"])
