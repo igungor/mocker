@@ -60,7 +60,9 @@ public actor ComposeOrchestrator {
         build: Bool = false,
         noBuild: Bool = false,
         forceRecreate: Bool = false,
-        noRecreate: Bool = false
+        noRecreate: Bool = false,
+        wait: Bool = false,
+        waitTimeout: Int? = nil
     ) async throws -> [ComposeEvent] {
         var events: [ComposeEvent] = []
 
@@ -246,6 +248,10 @@ public actor ComposeOrchestrator {
         // Then give each container the names of the services started after it.
         for write in Self.remainingHostnameWrites(startedContainers) {
             await appendHosts(write.lines, to: write.containerID)
+        }
+
+        if wait {
+            try await waitUntilReady(composeFile, completions: completions, timeout: waitTimeout)
         }
 
         return events
@@ -519,6 +525,49 @@ public actor ComposeOrchestrator {
         }
 
         return events
+    }
+
+    /// `up --wait`: block until every service is running, or healthy when it has a
+    /// health check, or has completed when another service waits for that, as Docker
+    /// Compose does. With a timeout, give up after `timeout` seconds.
+    private func waitUntilReady(
+        _ composeFile: ComposeFile,
+        completions: [String: Task<Int32, Error>],
+        timeout: Int?
+    ) async throws {
+        guard let timeout, timeout > 0 else {
+            try await waitUntilReady(composeFile, completions: completions)
+            return
+        }
+
+        try await withThrowingTaskGroup(of: Bool.self) { group in
+            group.addTask { try await self.waitUntilReady(composeFile, completions: completions); return true }
+            group.addTask { try await Task.sleep(for: .seconds(timeout)); return false }
+            let ready = try await group.next() ?? false
+            group.cancelAll()
+            guard ready else { throw MockerError.operationFailed("application not healthy after \(timeout)s") }
+        }
+    }
+
+    private func waitUntilReady(_ composeFile: ComposeFile, completions: [String: Task<Int32, Error>]) async throws {
+        let awaited = Self.servicesAwaitedForCompletion(composeFile)
+        for serviceName in composeFile.serviceOrder() {
+            guard let service = composeFile.services[serviceName] else { continue }
+            let containerName = "\(projectName)-\(serviceName)-1"
+
+            if awaited.contains(serviceName) {
+                if let exitCode = try await completions[serviceName]?.value, exitCode != 0 {
+                    throw MockerError.operationFailed("service \"\(serviceName)\" didn't complete successfully: exit \(exitCode)")
+                }
+            } else if let check = service.healthcheck, !check.isDisabled {
+                try await waitUntilHealthy(serviceName, composeFile: composeFile)
+            } else {
+                // Without a health check, running is enough. The runtime doesn't
+                // report exit codes, so unlike Docker the message has none.
+                let running = try await engine.list(all: false).contains { $0.name == containerName }
+                guard running else { throw MockerError.operationFailed("container \(containerName) exited") }
+            }
+        }
     }
 
     /// Services another service waits on with `condition: service_completed_successfully`.
