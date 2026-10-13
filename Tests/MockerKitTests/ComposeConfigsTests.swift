@@ -28,25 +28,25 @@ struct ComposeConfigsTests {
             external: true
         """)
 
-        #expect(file.configs["plain"] == ComposeConfigDefinition(file: "./app.conf"))
-        #expect(file.configs["inline"] == ComposeConfigDefinition(content: "hello"))
-        #expect(file.configs["env"] == ComposeConfigDefinition(environment: "SETTING"))
+        #expect(file.configs["plain"] == ComposeFileObject(file: "./app.conf"))
+        #expect(file.configs["inline"] == ComposeFileObject(content: "hello"))
+        #expect(file.configs["env"] == ComposeFileObject(environment: "SETTING"))
         #expect(file.configs["shared"]?.external == true)
 
         let references = try #require(file.services["app"]?.configs)
         #expect(references == [
-            ComposeConfigReference(source: "plain"),
-            ComposeConfigReference(source: "inline", target: "etc/inline.conf", mode: 0o440),
-            ComposeConfigReference(source: "env", mode: 0o440),
+            ComposeFileReference(source: "plain"),
+            ComposeFileReference(source: "inline", target: "etc/inline.conf", mode: 0o440),
+            ComposeFileReference(source: "env", mode: 0o440),
         ])
         #expect(references.map(\.containerPath) == ["/plain", "/etc/inline.conf", "/env"])
     }
 
     @Test("Names follow compose-go: name:, the key when external, <project>_<key> otherwise")
     func runtimeName() {
-        #expect(ComposeConfigDefinition(content: "x").runtimeName(key: "app", projectName: "demo") == "demo_app")
-        #expect(ComposeConfigDefinition(external: true).runtimeName(key: "app", projectName: "demo") == "app")
-        #expect(ComposeConfigDefinition(content: "x", customName: "custom").runtimeName(key: "app", projectName: "demo") == "custom")
+        #expect(ComposeFileObject(content: "x").runtimeName(key: "app", projectName: "demo") == "demo_app")
+        #expect(ComposeFileObject(external: true).runtimeName(key: "app", projectName: "demo") == "app")
+        #expect(ComposeFileObject(content: "x", customName: "custom").runtimeName(key: "app", projectName: "demo") == "custom")
     }
 
     @Test("environment: takes its content from .env and the shell, like interpolation")
@@ -95,14 +95,14 @@ struct ComposeConfigsTests {
         let merged = ComposeFile.merge([base, overlay])
 
         #expect(merged.configs.keys.sorted() == ["a", "b"])
-        #expect(merged.services["app"]?.configs == [ComposeConfigReference(source: "b")])
+        #expect(merged.services["app"]?.configs == [ComposeFileReference(source: "b")])
     }
 
     @Test("A config list change changes the service hash")
     func hash() throws {
         let plain = try #require(try ComposeFile.parse("services:\n  app:\n    image: alpine\n").services["app"])
         var withConfig = plain
-        withConfig.configs = [ComposeConfigReference(source: "a")]
+        withConfig.configs = [ComposeFileReference(source: "a")]
 
         #expect(ComposeService.hash(of: plain) != ComposeService.hash(of: withConfig))
     }

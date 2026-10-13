@@ -7,7 +7,7 @@ public struct ComposeFile: Sendable {
     public var services: [String: ComposeService]
     public var networks: [String: ComposeNetwork]
     public var volumes: [String: ComposeVolume]
-    public var configs: [String: ComposeConfigDefinition] = [:]
+    public var configs: [String: ComposeFileObject] = [:]
     /// Top-level `name:` key — one of the project-name sources (see `resolveProjectName`).
     public var name: String?
     /// Set by `filtering(services:)`, so a subset (`up web`) still knows which volumes the
@@ -384,10 +384,10 @@ public struct ComposeFile: Sendable {
         return file
     }
 
-    private static func parseConfigs(_ dict: [String: Any]) -> [String: ComposeConfigDefinition] {
+    private static func parseConfigs(_ dict: [String: Any]) -> [String: ComposeFileObject] {
         dict.reduce(into: [:]) { configs, entry in
             let config = entry.value as? [String: Any] ?? [:]
-            configs[entry.key] = ComposeConfigDefinition(
+            configs[entry.key] = ComposeFileObject(
                 file: config["file"] as? String,
                 content: config["content"] as? String,
                 environment: config["environment"] as? String,
@@ -565,7 +565,7 @@ public struct ComposeService: Sendable {
     public var labels: [String: String]
     public var hostname: String?
     public var workingDir: String?
-    public var configs: [ComposeConfigReference] = []
+    public var configs: [ComposeFileReference] = []
 
     // Resource limits — Docker Compose spec (legacy top-level + deploy.resources)
     public var memLimit: String?
@@ -679,7 +679,7 @@ public struct ComposeService: Sendable {
             labels: labels,
             hostname: dict["hostname"] as? String,
             workingDir: dict["working_dir"] as? String,
-            configs: ComposeConfigReference.parseList(dict["configs"]),
+            configs: ComposeFileReference.parseList(dict["configs"]),
             memLimit: memLimit,
             cpus: cpus,
             memReservation: memReservation,
@@ -1001,9 +1001,9 @@ public struct ComposeVolume: Sendable {
     }
 }
 
-/// A top-level `configs:` entry. Exactly one source is set: `file`, `content`, or
+/// A top-level `configs:` entry, compose-go's `FileObjectConfig`. Exactly one source is set: `file`, `content`, or
 /// `environment`, whose value is resolved into `content` at load time.
-public struct ComposeConfigDefinition: Sendable, Equatable {
+public struct ComposeFileObject: Sendable, Equatable {
     public var file: String?
     public var content: String?
     public var environment: String?
@@ -1032,8 +1032,9 @@ public struct ComposeConfigDefinition: Sendable, Equatable {
     }
 }
 
-/// A service's `configs:` entry, in its short (`- name`) or long form.
-public struct ComposeConfigReference: Sendable, Equatable, Encodable {
+/// A service's `configs:` entry, compose-go's `FileReferenceConfig`, in its short
+/// (`- name`) or long form.
+public struct ComposeFileReference: Sendable, Equatable, Encodable {
     public var source: String
     public var target: String?
     public var mode: Int?
@@ -1051,17 +1052,17 @@ public struct ComposeConfigReference: Sendable, Equatable, Encodable {
         return target.hasPrefix("/") ? target : "/\(target)"
     }
 
-    static func parseList(_ value: Any?) -> [ComposeConfigReference] {
+    static func parseList(_ value: Any?) -> [ComposeFileReference] {
         (value as? [Any] ?? []).compactMap { item in
             if let source = item as? String {
-                return ComposeConfigReference(source: source)
+                return ComposeFileReference(source: source)
             }
             guard let dict = item as? [String: Any], let source = dict["source"] as? String else {
                 return nil
             }
             // compose-go reads a string mode as octal and an integer as is.
             let mode = (dict["mode"] as? String).flatMap { Int($0, radix: 8) } ?? dict["mode"] as? Int
-            return ComposeConfigReference(source: source, target: dict["target"] as? String, mode: mode)
+            return ComposeFileReference(source: source, target: dict["target"] as? String, mode: mode)
         }
     }
 }
