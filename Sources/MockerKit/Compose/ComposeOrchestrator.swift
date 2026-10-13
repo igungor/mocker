@@ -332,7 +332,9 @@ public actor ComposeOrchestrator {
             }
         }
 
-        try? FileManager.default.removeItem(at: configsDirectory)
+        for kind in [FileObjectKind.config, .secret] {
+            try? FileManager.default.removeItem(at: hostDirectory(for: kind))
+        }
 
         return events
     }
@@ -830,7 +832,7 @@ public actor ComposeOrchestrator {
             namedVolumeSources: composeFile.volumes.mapValues {
                 try volumeManager.composeSource($0.runtimeName(projectName: projectName))
             }
-        ) + configMounts(for: service, composeFile: composeFile)
+        ) + fileObjectMounts(for: service, composeFile: composeFile)
 
         // Docker's exec model concatenates entrypoint + command into one argv.
         // Apple's `container` CLI can only override the executable
@@ -877,52 +879,74 @@ public actor ComposeOrchestrator {
         return config
     }
 
-    /// Where `content` and `environment` configs are written for the runtime to mount.
-    nonisolated var configsDirectory: URL {
+    /// Configs and secrets, which Docker Compose mounts the same way.
+    enum FileObjectKind: String {
+        case config, secret
+
+        /// Where a reference without an absolute target appears in the container.
+        var containerDirectory: String { self == .config ? "/" : "/run/secrets/" }
+    }
+
+    /// Where `content` and `environment` configs or secrets are written for the
+    /// runtime to mount.
+    nonisolated func hostDirectory(for kind: FileObjectKind) -> URL {
         URL(fileURLWithPath: MockerConfig().dataRoot)
-            .appendingPathComponent("configs", isDirectory: true)
+            .appendingPathComponent("\(kind.rawValue)s", isDirectory: true)
             .appendingPathComponent(projectName, isDirectory: true)
     }
 
-    /// `configs:` become read-only file mounts, as in Docker Compose without Swarm. A
-    /// `file` config mounts that file. Docker copies `content` and `environment` configs
-    /// into the container; here they are written to a file first, with the mode Docker
-    /// gives them. Errors match Docker Compose's.
-    func configMounts(for service: ComposeService, composeFile: ComposeFile) throws -> [VolumeMount] {
-        try service.configs.map { reference in
-            guard let config = composeFile.configs[reference.source] else {
+    func fileObjectMounts(for service: ComposeService, composeFile: ComposeFile) throws -> [VolumeMount] {
+        try fileObjectMounts(.config, service.configs, definitions: composeFile.configs, service: service.name)
+            + fileObjectMounts(.secret, service.secrets, definitions: composeFile.secrets, service: service.name)
+    }
+
+    /// Configs and secrets become read-only file mounts, as in Docker Compose without
+    /// Swarm. A `file` one mounts that file. Docker copies `content` and `environment`
+    /// ones into the container; here they are written to a file first, with the mode
+    /// Docker gives them. Errors match Docker Compose's.
+    private func fileObjectMounts(
+        _ kind: FileObjectKind,
+        _ references: [ComposeFileReference],
+        definitions: [String: ComposeFileObject],
+        service: String
+    ) throws -> [VolumeMount] {
+        try references.map { reference in
+            guard let object = definitions[reference.source] else {
                 throw MockerError.composeParseError(
-                    "service \"\(service.name)\" refers to undefined config \(reference.source): invalid compose project")
+                    "service \"\(service)\" refers to undefined \(kind.rawValue) \(reference.source): invalid compose project")
             }
 
-            let name = config.runtimeName(key: reference.source, projectName: projectName)
-            guard !config.external else {
-                throw MockerError.operationFailed("unsupported external config \(name)")
+            let name = object.runtimeName(key: reference.source, projectName: projectName)
+            guard !object.external else {
+                throw MockerError.operationFailed("unsupported external \(kind.rawValue) \(name)")
             }
 
-            if let file = config.file {
+            let target = reference.containerPath(in: kind.containerDirectory)
+            if let file = object.file {
                 let source = URL(fileURLWithPath: file, relativeTo: projectDir).standardized.path
-                return VolumeMount(source: source, destination: reference.containerPath, readOnly: true)
+                return VolumeMount(source: source, destination: target, readOnly: true)
             }
 
-            guard let content = config.content else {
-                throw MockerError.operationFailed(config.environment.map {
-                    "environment variable \"\($0)\" required by config \"\(name)\" is not set"
-                } ?? "config \"\(name)\" has no file, content or environment")
+            guard let content = object.content else {
+                throw MockerError.operationFailed(object.environment.map {
+                    "environment variable \"\($0)\" required by \(kind.rawValue) \"\(name)\" is not set"
+                } ?? "\(kind.rawValue) \"\(name)\" has no file, content or environment")
             }
 
-            let file = try writeConfig(content, service: service.name, key: reference.source, mode: reference.mode ?? 0o444)
-            return VolumeMount(source: file.path, destination: reference.containerPath, readOnly: true)
+            let file = try write(content, kind: kind, service: service, key: reference.source, mode: reference.mode ?? 0o444)
+            return VolumeMount(source: file.path, destination: target, readOnly: true)
         }
     }
 
-    private func writeConfig(_ content: String, service: String, key: String, mode: Int) throws -> URL {
+    private func write(_ content: String, kind: FileObjectKind, service: String, key: String, mode: Int) throws -> URL {
         guard !key.contains("/"), key != ".", key != ".." else {
-            throw MockerError.composeParseError("invalid config name: \(key)")
+            throw MockerError.composeParseError("invalid \(kind.rawValue) name: \(key)")
         }
 
-        let directory = configsDirectory.appendingPathComponent(service, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // Only the user may read them on the host, whatever mode the container sees.
+        let directory = hostDirectory(for: kind).appendingPathComponent(service, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
 
         // The previous write is read-only, so replace it rather than write over it.
         let file = directory.appendingPathComponent(key)
