@@ -24,6 +24,31 @@ struct ComposeFileTests {
         #expect(compose.services["redis"]?.image == "redis:7")
     }
 
+    @Test("Parse platform; a later file's platform wins; it changes the config hash")
+    func parsePlatform() throws {
+        let base = try ComposeFile.parse("""
+        services:
+          app:
+            image: alpine:latest
+            platform: linux/amd64
+          other:
+            image: alpine:latest
+        """)
+        let overlay = try ComposeFile.parse("""
+        services:
+          app:
+            platform: linux/arm64
+        """)
+
+        #expect(base.services["app"]?.platform == "linux/amd64")
+        #expect(base.services["other"]?.platform == nil)
+        #expect(ComposeFile.merge([base, overlay]).services["app"]?.platform == "linux/arm64")
+
+        var native = base.services["app"]!
+        native.platform = nil
+        #expect(ComposeService.hash(of: native) != ComposeService.hash(of: base.services["app"]!))
+    }
+
     @Test("Parse entrypoint in list form")
     func parseEntrypointList() throws {
         let compose = try ComposeFile.parse("""
@@ -848,6 +873,22 @@ struct ComposeFileTests {
       web:
         image: alpine:${TAG:-fallback}
     """
+
+    @Test("$$ is a literal $: neither interpolated nor left doubled")
+    func dollarDollarIsLiteralDollar() throws {
+        let root = try ComposeTestHelpers.makeProjectDir([
+            .file("compose.yml", """
+            services:
+              web:
+                image: alpine:${TAG:-fallback}
+                command: ["sh", "-c", "echo $$i $${TAG} ${TAG:-fallback}"]
+            """),
+        ])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let compose = try ComposeFile.load(from: root.appendingPathComponent("compose.yml").path, projectDir: root)
+        #expect(compose.services["web"]?.command == ["sh", "-c", "echo $i ${TAG} fallback"])
+    }
 
     @Test(".env loaded from projectDir, not the compose file's own dir")
     func envLoadedFromProjectDir() throws {
