@@ -862,6 +862,7 @@ public actor ComposeOrchestrator {
             hostname: service.hostname,
             restartPolicy: service.restart.flatMap { RestartPolicy(rawValue: $0) } ?? .no,
             entrypoint: exec.entrypoint,
+            platform: service.platform,
             // `restartPolicy` and `shmSize` (like the soft mem/cpu reservations) are stored on the
             // config for Docker surface parity, mirroring `run`/`create`. Apple's `container` CLI
             // currently exposes no `--restart`/`--shm-size` flags, so these are NOT enforced by the

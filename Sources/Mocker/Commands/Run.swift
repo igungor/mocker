@@ -434,6 +434,13 @@ struct Run: AsyncParsableCommand {
             dnsOption: dnsOption
         )
 
+        // `container run` pulls a missing image with its own registry logins, not
+        // the ones `mocker login` stored, so pull it through mocker first.
+        let images = try ImageManager(config: config)
+        if (try? await images.inspect(image)) == nil {
+            _ = try await images.pull(image, platform: platform)
+        }
+
         let container = try await engine.run(containerConfig)
 
         if detach {
