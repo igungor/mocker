@@ -24,6 +24,31 @@ struct ComposeFileTests {
         #expect(compose.services["redis"]?.image == "redis:7")
     }
 
+    @Test("Parse platform; a later file's platform wins; it changes the config hash")
+    func parsePlatform() throws {
+        let base = try ComposeFile.parse("""
+        services:
+          app:
+            image: alpine:latest
+            platform: linux/amd64
+          other:
+            image: alpine:latest
+        """)
+        let overlay = try ComposeFile.parse("""
+        services:
+          app:
+            platform: linux/arm64
+        """)
+
+        #expect(base.services["app"]?.platform == "linux/amd64")
+        #expect(base.services["other"]?.platform == nil)
+        #expect(ComposeFile.merge([base, overlay]).services["app"]?.platform == "linux/arm64")
+
+        var native = base.services["app"]!
+        native.platform = nil
+        #expect(ComposeService.hash(of: native) != ComposeService.hash(of: base.services["app"]!))
+    }
+
     @Test("Parse entrypoint in list form")
     func parseEntrypointList() throws {
         let compose = try ComposeFile.parse("""
