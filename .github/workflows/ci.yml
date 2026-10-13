@@ -6,6 +6,12 @@ on:
   push:
     branches: [main]
 
+# A new push to a pull request cancels its previous run instead of holding one
+# of the few macOS runners.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: Build & Test
@@ -20,8 +26,20 @@ jobs:
         with:
           xcode-version: latest-stable
 
+      - name: Swift version
+        id: swift
+        run: echo "hash=$(swift --version 2>&1 | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      # Fetching and compiling the dependencies is most of a cold build.
+      - name: Cache build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: build-${{ runner.os }}-${{ steps.swift.outputs.hash }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: build-${{ runner.os }}-${{ steps.swift.outputs.hash }}-
+
       - name: Build
-        run: swift build
+        run: swift build --build-tests
 
       - name: Test
-        run: swift test
+        run: swift test --skip-build
