@@ -39,7 +39,7 @@ struct ComposeConfigsTests {
             ComposeFileReference(source: "inline", target: "etc/inline.conf", mode: 0o440),
             ComposeFileReference(source: "env", mode: 0o440),
         ])
-        #expect(references.map(\.containerPath) == ["/plain", "/etc/inline.conf", "/env"])
+        #expect(references.map { $0.containerPath(in: "/") } == ["/plain", "/etc/inline.conf", "/env"])
     }
 
     @Test("Names follow compose-go: name:, the key when external, <project>_<key> otherwise")

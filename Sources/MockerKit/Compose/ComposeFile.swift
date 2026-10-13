@@ -8,6 +8,7 @@ public struct ComposeFile: Sendable {
     public var networks: [String: ComposeNetwork]
     public var volumes: [String: ComposeVolume]
     public var configs: [String: ComposeFileObject] = [:]
+    public var secrets: [String: ComposeFileObject] = [:]
     /// Top-level `name:` key — one of the project-name sources (see `resolveProjectName`).
     public var name: String?
     /// Set by `filtering(services:)`, so a subset (`up web`) still knows which volumes the
@@ -157,12 +158,11 @@ public struct ComposeFile: Sendable {
         }
         var own = try parse(dict)
 
-        // An `environment:` config takes its content from the same variables `${VAR}` sees.
+        // An `environment:` config or secret takes its content from the same variables
+        // `${VAR}` sees.
         let environment = interpolationEnvironment(dotEnv: dotEnv, resolved: variables)
-        for (key, config) in own.configs {
-            guard let variable = config.environment else { continue }
-            own.configs[key]?.content = environment[variable]
-        }
+        own.configs = own.configs.mapValues { $0.resolvingEnvironment(environment) }
+        own.secrets = own.secrets.mapValues { $0.resolvingEnvironment(environment) }
 
         guard let includes = try parseIncludes(dict["include"]), !includes.isEmpty else {
             return own
@@ -281,10 +281,8 @@ public struct ComposeFile: Sendable {
             build.context = dir.appendingPathComponent(build.context).standardized.path
             services[name]?.build = build
         }
-        for (key, config) in configs {
-            guard let file = config.file, !file.hasPrefix("/") else { continue }
-            configs[key]?.file = dir.appendingPathComponent(file).standardized.path
-        }
+        configs = configs.mapValues { $0.anchoringFile(to: dir) }
+        secrets = secrets.mapValues { $0.anchoringFile(to: dir) }
     }
 
     /// Absolutize the source of a `source:target[:mode]` spec when it is a relative
@@ -380,14 +378,15 @@ public struct ComposeFile: Sendable {
             services: services, networks: networks, volumes: volumes,
             name: dict["name"] as? String
         )
-        file.configs = parseConfigs(dict["configs"] as? [String: Any] ?? [:])
+        file.configs = parseFileObjects(dict["configs"] as? [String: Any] ?? [:])
+        file.secrets = parseFileObjects(dict["secrets"] as? [String: Any] ?? [:])
         return file
     }
 
-    private static func parseConfigs(_ dict: [String: Any]) -> [String: ComposeFileObject] {
-        dict.reduce(into: [:]) { configs, entry in
+    private static func parseFileObjects(_ dict: [String: Any]) -> [String: ComposeFileObject] {
+        dict.reduce(into: [:]) { objects, entry in
             let config = entry.value as? [String: Any] ?? [:]
-            configs[entry.key] = ComposeFileObject(
+            objects[entry.key] = ComposeFileObject(
                 file: config["file"] as? String,
                 content: config["content"] as? String,
                 environment: config["environment"] as? String,
@@ -480,6 +479,7 @@ public struct ComposeFile: Sendable {
         let filteredServices = services.filter { included.contains($0.key) }
         var filtered = ComposeFile(services: filteredServices, networks: networks, volumes: volumes, name: self.name)
         filtered.configs = configs
+        filtered.secrets = secrets
         filtered.projectSharedVolumes = sharedVolumeKeys
         return filtered
     }
@@ -523,6 +523,7 @@ public struct ComposeFile: Sendable {
             result.networks.merge(overlay.networks) { _, new in new }
             result.volumes.merge(overlay.volumes) { _, new in new }
             result.configs.merge(overlay.configs) { _, new in new }
+            result.secrets.merge(overlay.secrets) { _, new in new }
             result.name = overlay.name ?? result.name
         }
         return result
@@ -566,6 +567,7 @@ public struct ComposeService: Sendable {
     public var hostname: String?
     public var workingDir: String?
     public var configs: [ComposeFileReference] = []
+    public var secrets: [ComposeFileReference] = []
 
     // Resource limits — Docker Compose spec (legacy top-level + deploy.resources)
     public var memLimit: String?
@@ -583,7 +585,7 @@ public struct ComposeService: Sendable {
 
     private enum HashCodingKeys: String, CodingKey {
         case name, image, command, entrypoint, environment, ports, volumes, networks
-        case restart, labels, hostname, workingDir, configs
+        case restart, labels, hostname, workingDir, configs, secrets
         case memLimit, cpus, memReservation, cpusReservation, memSwapLimit
         case shmSize, pidsLimit
         case restartPolicyDelay, restartPolicyMaxAttempts, restartPolicyWindow
@@ -680,6 +682,7 @@ public struct ComposeService: Sendable {
             hostname: dict["hostname"] as? String,
             workingDir: dict["working_dir"] as? String,
             configs: ComposeFileReference.parseList(dict["configs"]),
+            secrets: ComposeFileReference.parseList(dict["secrets"]),
             memLimit: memLimit,
             cpus: cpus,
             memReservation: memReservation,
@@ -719,6 +722,7 @@ public struct ComposeService: Sendable {
             hostname: other.hostname ?? hostname,
             workingDir: other.workingDir ?? workingDir,
             configs: other.configs.isEmpty ? configs : other.configs,
+            secrets: other.secrets.isEmpty ? secrets : other.secrets,
             memLimit: other.memLimit ?? memLimit,
             cpus: other.cpus ?? cpus,
             memReservation: other.memReservation ?? memReservation,
@@ -899,6 +903,7 @@ extension ComposeService: Encodable {
         try c.encodeIfPresent(hostname, forKey: .hostname)
         try c.encodeIfPresent(workingDir, forKey: .workingDir)
         if !configs.isEmpty { try c.encode(configs, forKey: .configs) }
+        if !secrets.isEmpty { try c.encode(secrets, forKey: .secrets) }
         try c.encodeIfPresent(memLimit, forKey: .memLimit)
         try c.encodeIfPresent(cpus, forKey: .cpus)
         try c.encodeIfPresent(memReservation, forKey: .memReservation)
@@ -1001,7 +1006,7 @@ public struct ComposeVolume: Sendable {
     }
 }
 
-/// A top-level `configs:` entry, compose-go's `FileObjectConfig`. Exactly one source is set: `file`, `content`, or
+/// A top-level `configs:` or `secrets:` entry, compose-go's `FileObjectConfig`. Exactly one source is set: `file`, `content`, or
 /// `environment`, whose value is resolved into `content` at load time.
 public struct ComposeFileObject: Sendable, Equatable {
     public var file: String?
@@ -1024,7 +1029,21 @@ public struct ComposeFileObject: Sendable, Equatable {
         self.customName = customName
     }
 
-    /// The name Compose gives the config: `name:`, the key for an external
+    func resolvingEnvironment(_ environment: [String: String]) -> ComposeFileObject {
+        guard let variable = self.environment else { return self }
+        var resolved = self
+        resolved.content = environment[variable]
+        return resolved
+    }
+
+    func anchoringFile(to dir: URL) -> ComposeFileObject {
+        guard let file, !file.hasPrefix("/") else { return self }
+        var anchored = self
+        anchored.file = dir.appendingPathComponent(file).standardized.path
+        return anchored
+    }
+
+    /// The name Compose gives the config or secret: `name:`, the key for an external
     /// config, `<project>_<key>` otherwise.
     public func runtimeName(key: String, projectName: String) -> String {
         if let customName { return customName }
@@ -1032,7 +1051,7 @@ public struct ComposeFileObject: Sendable, Equatable {
     }
 }
 
-/// A service's `configs:` entry, compose-go's `FileReferenceConfig`, in its short
+/// A service's `configs:` or `secrets:` entry, compose-go's `FileReferenceConfig`, in its short
 /// (`- name`) or long form.
 public struct ComposeFileReference: Sendable, Equatable, Encodable {
     public var source: String
@@ -1045,11 +1064,11 @@ public struct ComposeFileReference: Sendable, Equatable, Encodable {
         self.mode = mode
     }
 
-    /// Where the config appears in the container: `/<source>` by default, and a
-    /// relative target is taken from `/`.
-    public var containerPath: String {
-        guard let target, !target.isEmpty else { return "/\(source)" }
-        return target.hasPrefix("/") ? target : "/\(target)"
+    /// Where it appears in the container: `<directory><source>` by default, and a
+    /// relative target is taken from `directory`.
+    public func containerPath(in directory: String) -> String {
+        guard let target, !target.isEmpty else { return directory + source }
+        return target.hasPrefix("/") ? target : directory + target
     }
 
     static func parseList(_ value: Any?) -> [ComposeFileReference] {
