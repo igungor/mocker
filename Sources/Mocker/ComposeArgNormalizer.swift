@@ -6,7 +6,7 @@ import Foundation
 /// per-subcommand `@OptionGroup` can actually parse them.
 ///
 /// Only the compose-level global options `-f`/`--file`, `-p`/`--project-name`,
-/// `--project-directory` and the valueless `--dry-run` are relocated; everything
+/// `--project-directory`, `--profile` and the valueless `--dry-run` are relocated; everything
 /// else is left exactly where it is so the parser's normal validation and error
 /// messages are preserved. This is a pure function so it can be unit-tested
 /// without spawning the CLI.
@@ -17,6 +17,7 @@ enum ComposeArgNormalizer {
         "-f", "--file",
         "-p", "--project-name",
         "--project-directory",
+        "--profile",
     ]
 
     /// Valueless global flags Docker also accepts before the subcommand.
