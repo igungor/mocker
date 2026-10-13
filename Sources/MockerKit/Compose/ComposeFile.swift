@@ -324,8 +324,9 @@ public struct ComposeFile: Sendable {
             .merging(resolved) { _, new in new }
 
         var result = yaml
-        // Match ${VAR:-default}, ${VAR-default}, ${VAR}
-        let pattern = #"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}"#
+        // Match $$ (an escaped, literal $) and ${VAR:-default}, ${VAR-default}, ${VAR}.
+        // $$ comes first, so `$${VAR}` stays the literal text `${VAR}`.
+        let pattern = #"\$\$|\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return result }
 
         // Process from end to start to preserve offsets
@@ -333,6 +334,10 @@ public struct ComposeFile: Sendable {
         let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
         for match in matches.reversed() {
             guard let range = Range(match.range, in: result) else { continue }
+            if result[range] == "$$" {
+                result.replaceSubrange(range, with: "$")
+                continue
+            }
             let varName = match.numberOfRanges > 1 && match.range(at: 1).location != NSNotFound
                 ? ns.substring(with: match.range(at: 1)) : ""
             let defaultVal = match.numberOfRanges > 2 && match.range(at: 2).location != NSNotFound
@@ -569,6 +574,11 @@ public struct ComposeService: Sendable {
     public var workingDir: String?
     /// `profiles:`: the service is only enabled when one of them is active.
     public var profiles: [String] = []
+    /// `condition` per dependency, from the long `depends_on` form.
+    public var dependsOnConditions: [String: String] = [:]
+    public var healthcheck: HealthCheck? = nil
+    /// `platform:` (e.g. `linux/amd64`): the image platform to run.
+    public var platform: String? = nil
 
     // Resource limits — Docker Compose spec (legacy top-level + deploy.resources)
     public var memLimit: String?
@@ -586,7 +596,7 @@ public struct ComposeService: Sendable {
 
     private enum HashCodingKeys: String, CodingKey {
         case name, image, command, entrypoint, environment, ports, volumes, networks
-        case restart, labels, hostname, workingDir
+        case restart, labels, hostname, workingDir, platform
         case memLimit, cpus, memReservation, cpusReservation, memSwapLimit
         case shmSize, pidsLimit
         case restartPolicyDelay, restartPolicyMaxAttempts, restartPolicyWindow
@@ -683,6 +693,9 @@ public struct ComposeService: Sendable {
             hostname: dict["hostname"] as? String,
             workingDir: dict["working_dir"] as? String,
             profiles: (dict["profiles"] as? [Any])?.map { "\($0)" } ?? [],
+            dependsOnConditions: parseDependsOnConditions(dict["depends_on"]),
+            healthcheck: HealthCheck.parse(dict["healthcheck"]),
+            platform: dict["platform"] as? String,
             memLimit: memLimit,
             cpus: cpus,
             memReservation: memReservation,
@@ -722,6 +735,9 @@ public struct ComposeService: Sendable {
             hostname: other.hostname ?? hostname,
             workingDir: other.workingDir ?? workingDir,
             profiles: other.profiles.isEmpty ? profiles : other.profiles,
+            dependsOnConditions: other.dependsOn.isEmpty ? dependsOnConditions : other.dependsOnConditions,
+            healthcheck: other.healthcheck ?? healthcheck,
+            platform: other.platform ?? platform,
             memLimit: other.memLimit ?? memLimit,
             cpus: other.cpus ?? cpus,
             memReservation: other.memReservation ?? memReservation,
@@ -805,6 +821,11 @@ public struct ComposeService: Sendable {
             return Array(dict.keys)
         }
         return []
+    }
+
+    private static func parseDependsOnConditions(_ value: Any?) -> [String: String] {
+        guard let dict = value as? [String: Any] else { return [:] }
+        return dict.compactMapValues { ($0 as? [String: Any])?["condition"] as? String }
     }
 
     private static func parseCommand(_ value: Any?) -> [String] {
@@ -901,6 +922,7 @@ extension ComposeService: Encodable {
         try c.encode(labels, forKey: .labels)
         try c.encodeIfPresent(hostname, forKey: .hostname)
         try c.encodeIfPresent(workingDir, forKey: .workingDir)
+        try c.encodeIfPresent(platform, forKey: .platform)
         try c.encodeIfPresent(memLimit, forKey: .memLimit)
         try c.encodeIfPresent(cpus, forKey: .cpus)
         try c.encodeIfPresent(memReservation, forKey: .memReservation)
