@@ -324,8 +324,9 @@ public struct ComposeFile: Sendable {
             .merging(resolved) { _, new in new }
 
         var result = yaml
-        // Match ${VAR:-default}, ${VAR-default}, ${VAR}
-        let pattern = #"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}"#
+        // Match $$ (an escaped, literal $) and ${VAR:-default}, ${VAR-default}, ${VAR}.
+        // $$ comes first, so `$${VAR}` stays the literal text `${VAR}`.
+        let pattern = #"\$\$|\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return result }
 
         // Process from end to start to preserve offsets
@@ -333,6 +334,10 @@ public struct ComposeFile: Sendable {
         let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
         for match in matches.reversed() {
             guard let range = Range(match.range, in: result) else { continue }
+            if result[range] == "$$" {
+                result.replaceSubrange(range, with: "$")
+                continue
+            }
             let varName = match.numberOfRanges > 1 && match.range(at: 1).location != NSNotFound
                 ? ns.substring(with: match.range(at: 1)) : ""
             let defaultVal = match.numberOfRanges > 2 && match.range(at: 2).location != NSNotFound

@@ -849,6 +849,22 @@ struct ComposeFileTests {
         image: alpine:${TAG:-fallback}
     """
 
+    @Test("$$ is a literal $: neither interpolated nor left doubled")
+    func dollarDollarIsLiteralDollar() throws {
+        let root = try ComposeTestHelpers.makeProjectDir([
+            .file("compose.yml", """
+            services:
+              web:
+                image: alpine:${TAG:-fallback}
+                command: ["sh", "-c", "echo $$i $${TAG} ${TAG:-fallback}"]
+            """),
+        ])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let compose = try ComposeFile.load(from: root.appendingPathComponent("compose.yml").path, projectDir: root)
+        #expect(compose.services["web"]?.command == ["sh", "-c", "echo $i ${TAG} fallback"])
+    }
+
     @Test(".env loaded from projectDir, not the compose file's own dir")
     func envLoadedFromProjectDir() throws {
         let root = try ComposeTestHelpers.makeProjectDir([
