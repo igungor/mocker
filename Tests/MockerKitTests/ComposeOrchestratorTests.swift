@@ -157,6 +157,14 @@ struct ComposeOrchestratorTests {
         #expect(!ComposeService.imageMatches(img, tag: "other-app:latest"))
     }
 
+    // MARK: - Service hostnames
+
+    @Test("Hostnames are written to /etc/hosts as root, so non-root images get them too")
+    func hostsAppendRunsAsRoot() {
+        let args = ComposeOrchestrator.hostsAppendArguments(containerID: "proj-web-1")
+        #expect(args == ["exec", "-i", "--user", "0", "proj-web-1", "tee", "-a", "--", "/etc/hosts"])
+    }
+
     // MARK: - Entrypoint resolution (compose `entrypoint:` support)
 
     @Test("Empty entrypoint leaves command untouched")

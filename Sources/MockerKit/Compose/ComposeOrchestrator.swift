@@ -498,7 +498,7 @@ public actor ComposeOrchestrator {
             // Use tee -a to append to /etc/hosts without shell interpolation
             let process = Process()
             process.executableURL = URL(fileURLWithPath: CLIResolver.resolve())
-            process.arguments = ["exec", "-i", target.info.id, "tee", "-a", "--", "/etc/hosts"]
+            process.arguments = Self.hostsAppendArguments(containerID: target.info.id)
             let inputPipe = Pipe()
             process.standardInput = inputPipe
             process.standardOutput = FileHandle.nullDevice
@@ -517,6 +517,13 @@ public actor ComposeOrchestrator {
                 // Silently ignore if container doesn't support exec (e.g. no tee)
             }
         }
+    }
+
+    /// `container exec` arguments that append stdin to a container's /etc/hosts.
+    /// Runs as root: /etc/hosts is root-owned, so the append fails in images that
+    /// run as a non-root user.
+    nonisolated static func hostsAppendArguments(containerID: String) -> [String] {
+        ["exec", "-i", "--user", "0", containerID, "tee", "-a", "--", "/etc/hosts"]
     }
 
     private func startService(
