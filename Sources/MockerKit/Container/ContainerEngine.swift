@@ -72,8 +72,32 @@ public actor ContainerEngine {
         return info
     }
 
-    static func buildRunArguments(name: String, config containerConfig: ContainerConfig) -> [String] {
-        var args = ["run"]
+    /// - Parameter subcommand: `run`, or `create` for a container that is started later.
+    /// Run a container until it exits and return its exit code, which the runtime
+    /// doesn't report otherwise: the container is created first, so it is stored like
+    /// any other, then `container start --attach` exits with the container's own code.
+    public func runToCompletion(_ containerConfig: ContainerConfig) async throws -> Int32 {
+        let name = containerConfig.name ?? generateName()
+        if let existing = try await store.findByName(name) {
+            throw MockerError.containerAlreadyExists(existing.name)
+        }
+
+        let (output, createCode) = try await runCLI(Self.buildRunArguments(name: name, config: containerConfig, subcommand: "create"))
+        guard createCode == 0 else {
+            let msg = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw MockerError.operationFailed(msg.isEmpty ? "container create failed" : msg)
+        }
+        try await store.save(try await fetchContainerInfo(id: name, name: name, config: containerConfig))
+
+        let (_, exitCode) = try await runCLI(["start", "--attach", name])
+        if let finished = try? await fetchContainerInfo(id: name, name: name, config: containerConfig) {
+            try await store.save(finished)
+        }
+        return exitCode
+    }
+
+    static func buildRunArguments(name: String, config containerConfig: ContainerConfig, subcommand: String = "run") -> [String] {
+        var args = [subcommand]
 
         args += ["--name", name]
 
@@ -176,7 +200,7 @@ public actor ContainerEngine {
         }
 
         // Detach by default unless interactive
-        if !containerConfig.interactive {
+        if subcommand == "run" && !containerConfig.interactive {
             args += ["-d"]
         }
 

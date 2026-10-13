@@ -198,11 +198,28 @@ public actor ComposeOrchestrator {
         let order = composeFile.serviceOrder()
         var startedContainers: [(serviceName: String, info: ContainerInfo)] = []
 
+        let awaited = Self.servicesAwaitedForCompletion(composeFile)
+        var completions: [String: Task<Int32, Error>] = [:]
+
         for serviceName in order where !skipSet.contains(serviceName) {
             guard let service = composeFile.services[serviceName] else { continue }
             for dependency in service.dependsOn where service.dependsOnConditions[dependency] == "service_healthy" {
                 try await waitUntilHealthy(dependency, composeFile: composeFile)
             }
+            for dependency in service.dependsOn where service.dependsOnConditions[dependency] == "service_completed_successfully" {
+                guard let exitCode = try await completions[dependency]?.value, exitCode != 0 else { continue }
+                throw MockerError.operationFailed("service \"\(dependency)\" didn't complete successfully: exit \(exitCode)")
+            }
+
+            // A service others wait on to complete runs in the background until it
+            // exits, so its exit code is known when they need it.
+            if awaited.contains(serviceName) {
+                let config = try await containerConfig(for: service, composeFile: composeFile, detach: detach, forceBuild: build, noBuild: noBuild)
+                completions[serviceName] = Task { try await engine.runToCompletion(config) }
+                events.append(.containerStarted("\(projectName)-\(service.name)-1"))
+                continue
+            }
+
             let info = try await startService(
                 service, composeFile: composeFile,
                 detach: detach, forceBuild: build, noBuild: noBuild
@@ -477,6 +494,13 @@ public actor ComposeOrchestrator {
         return events
     }
 
+    /// Services another service waits on with `condition: service_completed_successfully`.
+    nonisolated static func servicesAwaitedForCompletion(_ composeFile: ComposeFile) -> Set<String> {
+        Set(composeFile.services.values.flatMap { service in
+            service.dependsOn.filter { service.dependsOnConditions[$0] == "service_completed_successfully" }
+        })
+    }
+
     // MARK: - Private
 
     /// Block until `serviceName`'s health check passes, as `depends_on`
@@ -573,6 +597,19 @@ public actor ComposeOrchestrator {
         forceBuild: Bool = false,
         noBuild: Bool = false
     ) async throws -> ContainerInfo {
+        try await engine.run(try await containerConfig(
+            for: service, composeFile: composeFile, detach: detach, forceBuild: forceBuild, noBuild: noBuild
+        ))
+    }
+
+    /// Pull or build the service's image and return the config its container runs with.
+    private func containerConfig(
+        for service: ComposeService,
+        composeFile: ComposeFile = ComposeFile(),
+        detach: Bool,
+        forceBuild: Bool = false,
+        noBuild: Bool = false
+    ) async throws -> ContainerConfig {
         let containerName = "\(projectName)-\(service.name)-1"
 
         // Resolved once: it is both what the container joins and what is recorded on it,
@@ -676,7 +713,7 @@ public actor ComposeOrchestrator {
             cpus: service.cpus
         )
 
-        return try await engine.run(config)
+        return config
     }
 
     /// Resolve volume spec strings from a compose service into `VolumeMount` values.

@@ -157,6 +157,29 @@ struct ComposeOrchestratorTests {
         #expect(!ComposeService.imageMatches(img, tag: "other-app:latest"))
     }
 
+    // MARK: - depends_on: service_completed_successfully
+
+    @Test("Only services another one waits on to complete are awaited")
+    func servicesAwaitedForCompletion() throws {
+        let compose = try ComposeFile.parse("""
+        services:
+          db:
+            image: mysql:8.4
+          migrate:
+            image: alpine
+            depends_on: [db]
+          app:
+            image: alpine
+            depends_on:
+              db:
+                condition: service_started
+              migrate:
+                condition: service_completed_successfully
+        """)
+
+        #expect(ComposeOrchestrator.servicesAwaitedForCompletion(compose) == ["migrate"])
+    }
+
     // MARK: - Entrypoint resolution (compose `entrypoint:` support)
 
     @Test("Empty entrypoint leaves command untouched")

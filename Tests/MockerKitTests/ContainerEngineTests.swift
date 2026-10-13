@@ -209,6 +209,17 @@ struct ContainerEngineTests {
         if let idx { #expect(args[idx + 1] == "3G") }
     }
 
+    @Test("Create arguments start with create and don't detach")
+    func testCreateArgumentsDontDetach() {
+        let config = ContainerConfig(image: "alpine", command: ["echo", "hi"])
+
+        let args = ContainerEngine.buildRunArguments(name: "job", config: config, subcommand: "create")
+
+        #expect(args.first == "create")
+        #expect(!args.contains("-d"))
+        #expect(args.suffix(3) == ["alpine", "echo", "hi"])
+    }
+
     @Test("Run arguments omit -m when memory is unset")
     func testRunArgumentsOmitMemoryWhenUnset() {
         let config = ContainerConfig(image: "alpine")
