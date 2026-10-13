@@ -298,11 +298,14 @@ struct ComposeUp: AsyncParsableCommand {
 
         let events = try await orchestrator.up(
             composeFile: composeFile,
-            detach: detach,
+            // --wait implies detached mode, as in Docker Compose.
+            detach: detach || wait,
             build: build,
             noBuild: noBuild,
             forceRecreate: forceRecreate,
-            noRecreate: noRecreate
+            noRecreate: noRecreate,
+            wait: wait,
+            waitTimeout: waitTimeout
         )
         // Total is the work actually performed, matching `down`: counting declared
         // resources instead reported `1/2` whenever a volume already existed.
