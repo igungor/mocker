@@ -200,6 +200,9 @@ public actor ComposeOrchestrator {
 
         for serviceName in order where !skipSet.contains(serviceName) {
             guard let service = composeFile.services[serviceName] else { continue }
+            for dependency in service.dependsOn where service.dependsOnConditions[dependency] == "service_healthy" {
+                try await waitUntilHealthy(dependency, composeFile: composeFile)
+            }
             let info = try await startService(
                 service, composeFile: composeFile,
                 detach: detach, forceBuild: build, noBuild: noBuild
@@ -475,6 +478,50 @@ public actor ComposeOrchestrator {
     }
 
     // MARK: - Private
+
+    /// Block until `serviceName`'s health check passes, as `depends_on`
+    /// `condition: service_healthy` asks. Errors match Docker Compose's.
+    private func waitUntilHealthy(_ serviceName: String, composeFile: ComposeFile) async throws {
+        let containerName = "\(projectName)-\(serviceName)-1"
+        guard let check = composeFile.services[serviceName]?.healthcheck, !check.isDisabled else {
+            throw MockerError.operationFailed("dependency failed to start: container \(containerName) has no healthcheck configured")
+        }
+
+        let healthy = try await HealthCheck.waitUntilHealthy(
+            check,
+            probe: { await self.runHealthCheck(check, in: containerName) },
+            sleep: { try await Task.sleep(for: .seconds($0)) }
+        )
+        guard healthy else {
+            throw MockerError.operationFailed("dependency failed to start: container \(containerName) is unhealthy")
+        }
+    }
+
+    /// Run the check's command in the container: true when it exits 0 within its timeout.
+    private func runHealthCheck(_ check: HealthCheck, in containerName: String) async -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: CLIResolver.resolve())
+        process.arguments = ["exec", containerName] + check.command
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        return await withCheckedContinuation { continuation in
+            process.terminationHandler = { finished in
+                continuation.resume(returning: finished.terminationReason == .exit && finished.terminationStatus == 0)
+            }
+            do {
+                try process.run()
+            } catch {
+                process.terminationHandler = nil
+                continuation.resume(returning: false)
+                return
+            }
+
+            DispatchQueue.global().asyncAfter(deadline: .now() + check.timeout) {
+                if process.isRunning { process.terminate() }
+            }
+        }
+    }
 
     /// Inject other services' IPs into /etc/hosts of each running container.
     /// This enables service-name DNS resolution (e.g. "db:5432") in compose projects.
