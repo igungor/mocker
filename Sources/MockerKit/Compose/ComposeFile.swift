@@ -535,6 +535,9 @@ public struct ComposeService: Sendable {
     public var labels: [String: String]
     public var hostname: String?
     public var workingDir: String?
+    /// `condition` per dependency, from the long `depends_on` form.
+    public var dependsOnConditions: [String: String] = [:]
+    public var healthcheck: HealthCheck? = nil
     /// `platform:` (e.g. `linux/amd64`): the image platform to run.
     public var platform: String? = nil
 
@@ -650,6 +653,8 @@ public struct ComposeService: Sendable {
             labels: labels,
             hostname: dict["hostname"] as? String,
             workingDir: dict["working_dir"] as? String,
+            dependsOnConditions: parseDependsOnConditions(dict["depends_on"]),
+            healthcheck: HealthCheck.parse(dict["healthcheck"]),
             platform: dict["platform"] as? String,
             memLimit: memLimit,
             cpus: cpus,
@@ -689,6 +694,8 @@ public struct ComposeService: Sendable {
             labels: labels.merging(other.labels) { _, new in new },
             hostname: other.hostname ?? hostname,
             workingDir: other.workingDir ?? workingDir,
+            dependsOnConditions: other.dependsOn.isEmpty ? dependsOnConditions : other.dependsOnConditions,
+            healthcheck: other.healthcheck ?? healthcheck,
             platform: other.platform ?? platform,
             memLimit: other.memLimit ?? memLimit,
             cpus: other.cpus ?? cpus,
@@ -773,6 +780,11 @@ public struct ComposeService: Sendable {
             return Array(dict.keys)
         }
         return []
+    }
+
+    private static func parseDependsOnConditions(_ value: Any?) -> [String: String] {
+        guard let dict = value as? [String: Any] else { return [:] }
+        return dict.compactMapValues { ($0 as? [String: Any])?["condition"] as? String }
     }
 
     private static func parseCommand(_ value: Any?) -> [String] {
