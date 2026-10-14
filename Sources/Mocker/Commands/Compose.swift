@@ -282,7 +282,7 @@ struct ComposeUp: AsyncParsableCommand {
         // Filter to requested services only
         if !services.isEmpty {
             try composeFile.validateServiceNames(services)
-            composeFile = composeFile.filtering(services: services)
+            composeFile = composeFile.filtering(services: services, includeDependencies: !noDeps)
         }
 
         // Guard before `ensureDirectories`: a dry run must not write anything at all.

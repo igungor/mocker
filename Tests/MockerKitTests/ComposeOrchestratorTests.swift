@@ -73,6 +73,38 @@ struct ComposeOrchestratorTests {
         #expect(filtered.services["api"] == nil)
     }
 
+    @Test("--no-deps keeps only the requested services and drops their depends_on")
+    func filteringWithoutDependencies() throws {
+        let compose = try ComposeFile.parse("""
+        services:
+          db:
+            image: postgres
+            healthcheck:
+              test: ["CMD", "true"]
+          cache:
+            image: redis
+          app:
+            image: node
+            depends_on:
+              db:
+                condition: service_healthy
+              cache:
+                condition: service_started
+        """)
+
+        let withDeps = compose.filtering(services: ["app"])
+        #expect(withDeps.services.keys.sorted() == ["app", "cache", "db"])
+        #expect(withDeps.services["app"]?.dependsOn.sorted() == ["cache", "db"])
+
+        let noDeps = compose.filtering(services: ["app"], includeDependencies: false)
+        #expect(noDeps.services.keys.sorted() == ["app"])
+        #expect(noDeps.services["app"]?.dependsOn == [])
+        #expect(noDeps.services["app"]?.dependsOnConditions == [:])
+
+        let both = compose.filtering(services: ["app", "db"], includeDependencies: false)
+        #expect(both.services["app"]?.dependsOn == ["db"])
+    }
+
     // MARK: - Image source resolution (issue #14)
 
     @Test("image only resolves to pull")

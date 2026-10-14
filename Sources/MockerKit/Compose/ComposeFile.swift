@@ -507,18 +507,26 @@ public struct ComposeFile: Sendable {
 
     /// Return a new ComposeFile containing only the requested services
     /// and their transitive dependencies.
-    public func filtering(services requested: [String]) -> ComposeFile {
+    /// - Parameter includeDependencies: false for `up --no-deps`: only the requested
+    ///   services, with their `depends_on` on the others dropped, as Docker does.
+    public func filtering(services requested: [String], includeDependencies: Bool = true) -> ComposeFile {
         var included = Set<String>()
 
         func include(_ name: String) {
             guard !included.contains(name), let svc = services[name] else { return }
             included.insert(name)
-            for dep in svc.dependsOn { include(dep) }
+            if includeDependencies {
+                for dep in svc.dependsOn { include(dep) }
+            }
         }
 
         for name in requested { include(name) }
 
-        let filteredServices = services.filter { included.contains($0.key) }
+        var filteredServices = services.filter { included.contains($0.key) }
+        for (name, service) in filteredServices {
+            filteredServices[name]?.dependsOn = service.dependsOn.filter { included.contains($0) }
+            filteredServices[name]?.dependsOnConditions = service.dependsOnConditions.filter { included.contains($0.key) }
+        }
         var filtered = ComposeFile(services: filteredServices, networks: networks, volumes: volumes, name: self.name)
         filtered.configs = configs
         filtered.secrets = secrets
