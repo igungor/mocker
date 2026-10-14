@@ -198,7 +198,6 @@ public actor ComposeOrchestrator {
 
         // Start services in dependency order
         let order = composeFile.serviceOrder()
-        var startedContainers: [(serviceName: String, info: ContainerInfo)] = []
 
         let awaited = Self.servicesAwaitedForCompletion(composeFile)
         var completions: [String: Task<Int32, Error>] = [:]
@@ -217,38 +216,26 @@ public actor ComposeOrchestrator {
             // exits, so its exit code is known when they need it.
             if awaited.contains(serviceName) {
                 let config = try await containerConfig(for: service, composeFile: composeFile, detach: detach, forceBuild: build, noBuild: noBuild)
-                // Like any service, it needs the names of the services started before it.
-                let lines = startedContainers
-                    .filter { !$0.info.networkAddress.isEmpty }
-                    .map { "\($0.info.networkAddress) \($0.serviceName)\n" }
-                    .joined()
                 completions[serviceName] = Task {
-                    try await engine.runToCompletion(config) { started in
-                        if !lines.isEmpty { await self.appendHosts(lines, to: started.id) }
+                    try await engine.runToCompletion(config) { _ in
+                        try? await self.refreshHostsFiles(composeFile)
                     }
                 }
                 events.append(.containerStarted("\(projectName)-\(service.name)-1"))
                 continue
             }
 
-            let info = try await startService(
+            _ = try await startService(
                 service, composeFile: composeFile,
                 detach: detach, forceBuild: build, noBuild: noBuild
             )
-            let containerName = "\(projectName)-\(service.name)-1"
-            // Give a starting container the names of the services started before it,
-            // which include its dependencies, so it can reach them at startup.
-            if let lines = Self.hostnameLines(for: info, after: startedContainers) {
-                await appendHosts(lines, to: info.id)
-            }
-            startedContainers.append((serviceName: serviceName, info: info))
-            events.append(.containerStarted(containerName))
+            // Its own name now that it has an address, and its name for the others.
+            try await refreshHostsFiles(composeFile)
+            events.append(.containerStarted("\(projectName)-\(service.name)-1"))
         }
 
-        // Then give each container the names of the services started after it.
-        for write in Self.remainingHostnameWrites(startedContainers) {
-            await appendHosts(write.lines, to: write.containerID)
-        }
+        // Containers started rather than recreated above have new addresses too.
+        try await refreshHostsFiles(composeFile)
 
         if wait {
             try await waitUntilReady(composeFile, completions: completions, timeout: waitTimeout)
@@ -335,6 +322,7 @@ public actor ComposeOrchestrator {
         for kind in [FileObjectKind.config, .secret] {
             try? FileManager.default.removeItem(at: hostDirectory(for: kind))
         }
+        try? FileManager.default.removeItem(at: hostsDirectory)
 
         return events
     }
@@ -511,18 +499,8 @@ public actor ComposeOrchestrator {
             }
         }
 
-        // Restarted containers have new IPs, so rewrite every running container's
-        // hostnames, not just the restarted ones'.
-        let running = try await ps().filter { $0.state.isActive && !$0.networkAddress.isEmpty }
-        let serviceNames = Set(composeFile.services.keys)
-        for container in running {
-            let lines = running
-                .filter { $0.id != container.id }
-                .compactMap { other in other.labels["com.mocker.compose.service"].map { "\(other.networkAddress) \($0)\n" } }
-                .joined()
-            guard let current = await readHosts(of: container.id) else { continue }
-            await writeHosts(Self.hostsReplacing(serviceNames, in: current, with: lines), to: container.id)
-        }
+        // Restarted containers have new addresses, so every container's hostnames change.
+        try await refreshHostsFiles(composeFile)
 
         return events
     }
@@ -577,55 +555,6 @@ public actor ComposeOrchestrator {
         })
     }
 
-    /// /etc/hosts content with the lines for `serviceNames` replaced by `lines`.
-    nonisolated static func hostsReplacing(_ serviceNames: Set<String>, in current: String, with lines: String) -> String {
-        let kept = current
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { line in
-                let names = line.split(whereSeparator: \.isWhitespace).dropFirst()
-                return !names.contains { serviceNames.contains(String($0)) }
-            }
-            .joined(separator: "\n")
-        let base = kept.hasSuffix("\n") || kept.isEmpty ? kept : kept + "\n"
-        return base + lines
-    }
-
-    private func readHosts(of containerID: String) async -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: CLIResolver.resolve())
-        process.arguments = ["exec", containerID, "cat", "/etc/hosts"]
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
-        } catch {
-            return nil
-        }
-    }
-
-    private func writeHosts(_ content: String, to containerID: String) async {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: CLIResolver.resolve())
-        // As root, like the append: /etc/hosts is root-owned.
-        process.arguments = ["exec", "-i", "--user", "0", containerID, "tee", "--", "/etc/hosts"]
-        let input = Pipe()
-        process.standardInput = input
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            input.fileHandleForWriting.write(Data(content.utf8))
-            input.fileHandleForWriting.closeFile()
-            process.waitUntilExit()
-        } catch {
-            // Silently ignore if container doesn't support exec (e.g. no tee)
-        }
-    }
-
     // MARK: - Private
 
     /// Block until `serviceName`'s health check passes, as `depends_on`
@@ -672,84 +601,101 @@ public actor ComposeOrchestrator {
         }
     }
 
-    /// Inject other services' IPs into /etc/hosts of each running container.
-    /// This enables service-name DNS resolution (e.g. "db:5432") in compose projects.
-    private func injectServiceHostnames(_ containers: [(serviceName: String, info: ContainerInfo)]) async {
-        // Only containers with a known IP can participate
-        let withIP = containers.filter { !$0.info.networkAddress.isEmpty }
-        guard withIP.count > 1 else { return }
+    /// Each container's /etc/hosts is a file here, mounted in place of the runtime's.
+    /// It is written before the container starts, so the services it depends on resolve
+    /// from its first instruction, and rewritten when addresses change, without exec.
+    nonisolated var hostsDirectory: URL {
+        URL(fileURLWithPath: MockerConfig().dataRoot)
+            .appendingPathComponent("hosts", isDirectory: true)
+            .appendingPathComponent(projectName, isDirectory: true)
+    }
 
-        for target in withIP {
-            // Build /etc/hosts entries for all *other* services
-            let otherServices = withIP.filter { $0.serviceName != target.serviceName }
-            guard !otherServices.isEmpty else { continue }
+    nonisolated func hostsFile(for serviceName: String) -> URL {
+        hostsDirectory
+            .appendingPathComponent(serviceName, isDirectory: true)
+            .appendingPathComponent("hosts")
+    }
 
-            // Build args array for safe execution — no shell interpolation
-            // Each entry is passed as a separate argument to avoid injection
-            var hostsContent = ""
-            for svc in otherServices {
-                hostsContent += "\(svc.info.networkAddress) \(svc.serviceName)\n"
-            }
+    /// `current` /etc/hosts updated to map each of `entries` and nothing else under the
+    /// `managed` names. Lines that stay keep their place and new ones go at the end:
+    /// the container caches the file's size for a moment, so content that moved past
+    /// the old end would be cut off from it.
+    nonisolated static func updatedHosts(
+        _ current: String?,
+        entries: [(name: String, address: String)],
+        managed: Set<String>
+    ) -> String {
+        var lines = current?.split(separator: "\n").map(String.init) ?? ["127.0.0.1 localhost"]
+        let wanted = entries.map { "\($0.address) \($0.name)" }
+        lines = lines.filter { line in
+            let names = line.split(whereSeparator: \.isWhitespace).dropFirst()
+            return wanted.contains(line) || !names.contains { managed.contains(String($0)) }
+        }
+        lines += wanted.filter { !lines.contains($0) }
+        return lines.joined(separator: "\n") + "\n"
+    }
 
-            await appendHosts(hostsContent, to: target.info.id)
+    /// Write a service's hosts file, appending when only lines were added. Never
+    /// truncate first or replace the file: a running container reads this very file.
+    private func writeHostsFile(
+        for serviceName: String,
+        entries: [(name: String, address: String)],
+        managed: Set<String>,
+        fresh: Bool = false
+    ) throws -> URL {
+        let file = hostsFile(for: serviceName)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        let current = fresh ? nil : try? String(contentsOf: file, encoding: .utf8)
+        let content = Self.updatedHosts(current, entries: entries, managed: managed)
+        guard content != current else { return file }
+        guard let handle = FileHandle(forWritingAtPath: file.path) else {
+            try content.write(to: file, atomically: false, encoding: .utf8)
+            return file
+        }
+        defer { try? handle.close() }
+
+        if let current, content.hasPrefix(current) {
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(content.utf8.dropFirst(current.utf8.count)))
+        } else {
+            let data = Data(content.utf8)
+            try handle.write(contentsOf: data)
+            try handle.truncate(atOffset: UInt64(data.count))
+        }
+        return file
+    }
+
+    /// Running containers that have an address, with their service.
+    private func runningServices() async throws -> [(service: String, info: ContainerInfo)] {
+        try await ps().compactMap { container in
+            guard container.state.isActive, !container.networkAddress.isEmpty,
+                  let service = container.labels["com.mocker.compose.service"] else { return nil }
+            return (service, container)
         }
     }
 
-    /// /etc/hosts lines for a container that just started: the services started
-    /// before it. Nil when there is nothing to write.
-    nonisolated static func hostnameLines(
-        for new: ContainerInfo,
-        after earlier: [(serviceName: String, info: ContainerInfo)]
-    ) -> String? {
-        let others = earlier.filter { !$0.info.networkAddress.isEmpty }
-        guard !new.networkAddress.isEmpty, !others.isEmpty else { return nil }
-        return others.map { "\($0.info.networkAddress) \($0.serviceName)\n" }.joined()
+    /// The hosts file a new container starts with: every running service but itself.
+    private func writeHostsFileBeforeStart(_ serviceName: String, composeFile: ComposeFile) async throws -> URL {
+        let others = try await runningServices()
+            .filter { $0.service != serviceName }
+            .map { (name: $0.service, address: $0.info.networkAddress) }
+            .sorted { $0.name < $1.name }
+        return try writeHostsFile(for: serviceName, entries: others, managed: Set(composeFile.services.keys), fresh: true)
     }
 
-    /// Once every container has started, the /etc/hosts lines each one still
-    /// needs: the services started after it.
-    nonisolated static func remainingHostnameWrites(
-        _ started: [(serviceName: String, info: ContainerInfo)]
-    ) -> [(containerID: String, lines: String)] {
-        started.indices.compactMap { index in
-            let container = started[index].info
-            guard let lines = hostnameLines(for: container, after: Array(started[(index + 1)...])) else {
-                return nil
-            }
-            return (containerID: container.id, lines: lines)
+    /// Update every running container's hosts file with its own name and the others'.
+    private func refreshHostsFiles(_ composeFile: ComposeFile) async throws {
+        let running = try await runningServices()
+        for (service, info) in running {
+            let hostname = composeFile.services[service]?.hostname ?? info.name
+            let others = running
+                .filter { $0.service != service }
+                .map { (name: $0.service, address: $0.info.networkAddress) }
+                .sorted { $0.name < $1.name }
+            let entries = [(name: hostname, address: info.networkAddress)] + others
+            _ = try writeHostsFile(for: service, entries: entries, managed: Set(composeFile.services.keys).union([hostname]))
         }
-    }
-
-    /// Append `lines` to a container's /etc/hosts.
-    private func appendHosts(_ lines: String, to containerID: String) async {
-        // Use tee -a to append to /etc/hosts without shell interpolation
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: CLIResolver.resolve())
-        process.arguments = Self.hostsAppendArguments(containerID: containerID)
-        let inputPipe = Pipe()
-        process.standardInput = inputPipe
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            inputPipe.fileHandleForWriting.write(Data(lines.utf8))
-            inputPipe.fileHandleForWriting.closeFile()
-            // Async-safe: use terminationHandler instead of blocking waitUntilExit
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                process.terminationHandler = { _ in
-                    continuation.resume()
-                }
-            }
-        } catch {
-            // Silently ignore if container doesn't support exec (e.g. no tee)
-        }
-    }
-
-    /// `container exec` arguments that append stdin to a container's /etc/hosts.
-    /// Runs as root: /etc/hosts is root-owned, so the append fails in images that
-    /// run as a non-root user.
-    nonisolated static func hostsAppendArguments(containerID: String) -> [String] {
-        ["exec", "-i", "--user", "0", containerID, "tee", "-a", "--", "/etc/hosts"]
     }
 
     private func startService(
@@ -833,6 +779,7 @@ public actor ComposeOrchestrator {
                 try volumeManager.composeSource($0.runtimeName(projectName: projectName))
             }
         ) + fileObjectMounts(for: service, composeFile: composeFile)
+            + [VolumeMount(source: try await writeHostsFileBeforeStart(service.name, composeFile: composeFile).path, destination: "/etc/hosts")]
 
         // Docker's exec model concatenates entrypoint + command into one argv.
         // Apple's `container` CLI can only override the executable
