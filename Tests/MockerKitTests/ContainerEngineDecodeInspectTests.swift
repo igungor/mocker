@@ -128,7 +128,7 @@ struct ContainerEngineDecodeInspectTests {
         let config = makeConfig()
         let result = ContainerEngine.decodeInspect(dict, id: "id1", name: "ctn", config: config)
         // Covers the Compose /etc/hosts injection contract: networkAddress must be non-empty
-        // when the inspect blob carries a network, so injectServiceHostnames includes the container.
+        // when the inspect blob carries a network, so the container is in the others' hosts files.
         #expect(result?.networkAddress != "")
         #expect(result?.networkAddress == "172.16.0.5")
     }

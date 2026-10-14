@@ -182,46 +182,30 @@ struct ComposeOrchestratorTests {
 
     // MARK: - Service hostnames
 
-    @Test("Hostnames are written to /etc/hosts as root, so non-root images get them too")
-    func hostsAppendRunsAsRoot() {
-        let args = ComposeOrchestrator.hostsAppendArguments(containerID: "proj-web-1")
-        #expect(args == ["exec", "-i", "--user", "0", "proj-web-1", "tee", "-a", "--", "/etc/hosts"])
+    @Test("A new hosts file has localhost and the given services")
+    func newHostsFile() {
+        let hosts = ComposeOrchestrator.updatedHosts(nil, entries: [("db", "10.0.0.2"), ("web", "10.0.0.4")], managed: ["db", "web"])
+
+        #expect(hosts == "127.0.0.1 localhost\n10.0.0.2 db\n10.0.0.4 web\n")
     }
 
-    private static func container(_ id: String, address: String) -> ContainerInfo {
-        ContainerInfo(id: id, name: id, image: "img", state: .running, status: "Up", created: Date(), networkAddress: address)
+    @Test("New names go at the end, so the lines a container already has don't move")
+    func hostsOnlyGrowAtTheEnd() {
+        let current = "127.0.0.1 localhost\n10.0.0.2 db\n"
+
+        let hosts = ComposeOrchestrator.updatedHosts(
+            current, entries: [("p-cache-1", "10.0.0.3"), ("db", "10.0.0.2"), ("web", "10.0.0.4")], managed: ["db", "web", "cache", "p-cache-1"])
+
+        #expect(hosts == current + "10.0.0.3 p-cache-1\n10.0.0.4 web\n")
     }
 
-    @Test("A starting container gets the names of the services started before it")
-    func hostnameLinesForStartingContainer() {
-        let db = (serviceName: "db", info: Self.container("p-db-1", address: "10.0.0.2"))
-        let cache = (serviceName: "cache", info: Self.container("p-cache-1", address: "10.0.0.3"))
-        let web = Self.container("p-web-1", address: "10.0.0.4")
+    @Test("A service's changed address replaces its line; unrelated lines stay")
+    func hostsChangedAddress() {
+        let current = "127.0.0.1 localhost\n10.0.0.2 db\n10.0.0.4 web\n10.9.9.9 added-by-entrypoint\n"
 
-        #expect(ComposeOrchestrator.hostnameLines(for: web, after: [db, cache]) == "10.0.0.2 db\n10.0.0.3 cache\n")
-        #expect(ComposeOrchestrator.hostnameLines(for: web, after: []) == nil)
-        #expect(ComposeOrchestrator.hostnameLines(for: Self.container("p-x-1", address: ""), after: [db]) == nil)
-    }
+        let hosts = ComposeOrchestrator.updatedHosts(current, entries: [("db", "10.0.0.2"), ("web", "10.0.0.5")], managed: ["db", "web"])
 
-    @Test("Once all are up, each container gets the names of the services started after it")
-    func remainingHostnameWritesAfterUp() {
-        let db = (serviceName: "db", info: Self.container("p-db-1", address: "10.0.0.2"))
-        let cache = (serviceName: "cache", info: Self.container("p-cache-1", address: "10.0.0.3"))
-        let web = (serviceName: "web", info: Self.container("p-web-1", address: "10.0.0.4"))
-
-        let writes = ComposeOrchestrator.remainingHostnameWrites([db, cache, web])
-
-        #expect(writes.map(\.containerID) == ["p-db-1", "p-cache-1"])
-        #expect(writes.map(\.lines) == ["10.0.0.3 cache\n10.0.0.4 web\n", "10.0.0.4 web\n"])
-    }
-
-    @Test("Rewriting hostnames replaces a service's stale line and keeps the rest")
-    func hostsReplacingStaleLines() {
-        let current = "127.0.0.1 localhost\n10.0.0.9 p-client-1\n10.0.0.2 web\n10.0.0.3 db\n"
-
-        let updated = ComposeOrchestrator.hostsReplacing(["web", "db", "client"], in: current, with: "10.0.0.5 web\n10.0.0.3 db\n")
-
-        #expect(updated == "127.0.0.1 localhost\n10.0.0.9 p-client-1\n10.0.0.5 web\n10.0.0.3 db\n")
+        #expect(hosts == "127.0.0.1 localhost\n10.0.0.2 db\n10.9.9.9 added-by-entrypoint\n10.0.0.5 web\n")
     }
 
     // MARK: - Entrypoint resolution (compose `entrypoint:` support)
