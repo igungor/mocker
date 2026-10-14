@@ -22,10 +22,10 @@ struct Port: AsyncParsableCommand {
                 let parts = privatePort.split(separator: "/")
                 let portNum = UInt16(parts[0]) ?? 0
                 if port.containerPort == portNum {
-                    print("0.0.0.0:\(port.hostPort)")
+                    print("\(port.hostIp ?? "0.0.0.0"):\(port.hostPort)")
                 }
             } else {
-                print("\(port.containerPort)/\(port.portProtocol.rawValue) -> 0.0.0.0:\(port.hostPort)")
+                print("\(port.containerPort)/\(port.portProtocol.rawValue) -> \(port.hostIp ?? "0.0.0.0"):\(port.hostPort)")
             }
         }
     }

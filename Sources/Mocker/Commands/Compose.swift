@@ -1663,7 +1663,7 @@ struct ComposePort: AsyncParsableCommand {
         let containerName = "\(project)-\(service)-\(index)"
         let info = try await engine.inspect(containerName)
         if let port = info.ports.first(where: { $0.containerPort == UInt16(privatePort) }) {
-            print("0.0.0.0:\(port.hostPort)")
+            print("\(port.hostIp ?? "0.0.0.0"):\(port.hostPort)")
         }
     }
 }
