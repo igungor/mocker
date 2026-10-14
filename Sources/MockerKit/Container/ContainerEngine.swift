@@ -40,7 +40,8 @@ public actor ContainerEngine {
 
     // MARK: - Run
 
-    public func run(_ containerConfig: ContainerConfig) async throws -> ContainerInfo {
+    public func run(_ requested: ContainerConfig) async throws -> ContainerInfo {
+        let containerConfig = try Self.assigningHostPorts(requested)
         let name = containerConfig.name ?? generateName()
 
         // Check for name conflicts in our store
@@ -72,6 +73,43 @@ public actor ContainerEngine {
         return info
     }
 
+    /// `requested` with a free host port for each mapping that left it to the runtime
+    /// (`-p 80`, `127.0.0.1::80`). Apple's runtime needs an explicit one, so the OS picks
+    /// it here, and the container keeps it like any other port.
+    static func assigningHostPorts(_ requested: ContainerConfig) throws -> ContainerConfig {
+        var config = requested
+        config.ports = try requested.ports.map { mapping in
+            guard mapping.hostPort == 0 else { return mapping }
+            var assigned = mapping
+            assigned.hostPort = try freeHostPort(mapping.portProtocol)
+            return assigned
+        }
+        return config
+    }
+
+    /// A port nothing on the host is bound to: bind to port 0 on every address and
+    /// read back the one the OS chose.
+    static func freeHostPort(_ portProtocol: PortProtocol) throws -> UInt16 {
+        let fd = socket(AF_INET, portProtocol == .udp ? SOCK_DGRAM : SOCK_STREAM, 0)
+        guard fd >= 0 else { throw MockerError.operationFailed("no free host port: socket failed") }
+        defer { close(fd) }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = INADDR_ANY
+        address.sin_port = 0
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+
+        let bound = withUnsafeMutablePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                bind(fd, generic, length) == 0 && getsockname(fd, generic, &length) == 0
+            }
+        }
+        guard bound else { throw MockerError.operationFailed("no free host port: bind failed") }
+        return UInt16(bigEndian: address.sin_port)
+    }
+
     /// - Parameter subcommand: `run`, or `create` for a container that is started later.
     /// Run a container until it exits and return its exit code, which the runtime
     /// doesn't report otherwise: the container is created first, so it is stored like
@@ -79,9 +117,10 @@ public actor ContainerEngine {
     /// - Parameter onStart: called once the container is running, e.g. to write
     ///   hostnames into it. A container that exits before it is seen running skips it.
     public func runToCompletion(
-        _ containerConfig: ContainerConfig,
+        _ requested: ContainerConfig,
         onStart: @escaping @Sendable (ContainerInfo) async -> Void = { _ in }
     ) async throws -> Int32 {
+        let containerConfig = try Self.assigningHostPorts(requested)
         let name = containerConfig.name ?? generateName()
         if let existing = try await store.findByName(name) {
             throw MockerError.containerAlreadyExists(existing.name)

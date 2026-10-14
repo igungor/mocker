@@ -44,16 +44,23 @@ struct FlagEnforcementTests {
         #expect(try PortMapping.parse("80").hostIp == nil)
     }
 
-    @Test("PortMapping parse bare container port maps host to same port")
+    @Test("PortMapping parse bare container port leaves the host port to the runtime")
     func testPortMappingBareContainerPort() throws {
         let pm = try PortMapping.parse("80")
-        #expect(pm.hostPort == 80)
+        #expect(pm.hostPort == 0)
         #expect(pm.containerPort == 80)
 
         let udp = try PortMapping.parse("53/udp")
-        #expect(udp.hostPort == 53)
+        #expect(udp.hostPort == 0)
         #expect(udp.containerPort == 53)
         #expect(udp.portProtocol == .udp)
+
+        let loopback = try PortMapping.parse("127.0.0.1::5432")
+        #expect(loopback.hostIp == "127.0.0.1")
+        #expect(loopback.hostPort == 0)
+        #expect(loopback.containerPort == 5432)
+
+        #expect(throws: MockerError.self) { try PortMapping.parse("::80") }
     }
 
     @Test("PortMapping parse rejects port ranges")

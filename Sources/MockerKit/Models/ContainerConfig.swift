@@ -115,6 +115,7 @@ public struct ContainerConfig: Codable, Sendable {
 
 /// Port mapping between host and container.
 public struct PortMapping: Codable, Sendable, CustomStringConvertible {
+    /// 0 until the runtime starts the container: the spec left it to Docker to pick.
     public var hostPort: UInt16
     public var containerPort: UInt16
     public var portProtocol: PortProtocol
@@ -136,10 +137,11 @@ public struct PortMapping: Codable, Sendable, CustomStringConvertible {
     }
 
     /// Parse a port mapping string. Accepts the common Docker/Compose forms:
-    ///   "80"                      -> same host and container port
+    ///   "80"                      -> container port, any free host port (hostPort 0)
     ///   "8080:80"                 -> explicit host:container
     ///   "8080:80/udp"             -> with protocol
     ///   "127.0.0.1:8080:80"       -> host-ip:host:container (binds only that host IP)
+    ///   "127.0.0.1::80"           -> host-ip, any free host port
     /// Port ranges (e.g. "8000-8010:9000-9010") are not yet supported and throw.
     /// ponytail: bracketed IPv6 host IPs (`[::1]:8080:80`) aren't parsed; split-on-`:`
     /// only handles IPv4/hostname prefixes. Add a bracket-aware scan if IPv6 is needed.
@@ -147,15 +149,14 @@ public struct PortMapping: Codable, Sendable, CustomStringConvertible {
         let parts = value.split(separator: "/")
         let proto: PortProtocol = parts.count > 1 ? (parts[1] == "udp" ? .udp : .tcp) : .tcp
 
-        let portParts = parts[0].split(separator: ":")
+        let portParts = parts[0].split(separator: ":", omittingEmptySubsequences: false)
         switch portParts.count {
         case 1:
-            // Bare container port. Docker would assign a random host port; mocker maps
-            // host == container for predictable, scriptable behaviour.
+            // Bare container port: like Docker, any free host port.
             guard let port = UInt16(portParts[0]) else {
                 throw MockerError.invalidPortMapping(value)
             }
-            return PortMapping(hostPort: port, containerPort: port, portProtocol: proto)
+            return PortMapping(hostPort: 0, containerPort: port, portProtocol: proto)
         case 2:
             guard let host = UInt16(portParts[0]), let container = UInt16(portParts[1]) else {
                 throw MockerError.invalidPortMapping(value)
@@ -164,9 +165,11 @@ public struct PortMapping: Codable, Sendable, CustomStringConvertible {
         case 3:
             // portParts[0] is the host IP (e.g. 127.0.0.1); bound explicitly so callers can
             // restrict a published port to loopback rather than the 0.0.0.0 wildcard.
+            // An empty host port (`127.0.0.1::80`) means any free one, as in Docker.
             let hostIp = String(portParts[0])
             guard !hostIp.isEmpty,
-                let host = UInt16(portParts[1]), let container = UInt16(portParts[2]) else {
+                let host = portParts[1].isEmpty ? 0 : UInt16(portParts[1]),
+                let container = UInt16(portParts[2]) else {
                 throw MockerError.invalidPortMapping(value)
             }
             return PortMapping(hostPort: host, containerPort: container, portProtocol: proto, hostIp: hostIp)

@@ -5,6 +5,21 @@ import Foundation
 @Suite("ContainerEngine Tests")
 struct ContainerEngineTests {
 
+    @Test("A port left to the runtime gets a free host port; explicit ones stay")
+    func assignsFreeHostPorts() throws {
+        let config = ContainerConfig(image: "nginx", ports: [
+            try PortMapping.parse("127.0.0.1::80"),
+            try PortMapping.parse("53/udp"),
+            try PortMapping.parse("8080:80"),
+        ])
+
+        let assigned = try ContainerEngine.assigningHostPorts(config).ports
+
+        #expect(assigned[0].hostPort != 0 && assigned[0].hostIp == "127.0.0.1")
+        #expect(assigned[1].hostPort != 0 && assigned[1].portProtocol == .udp)
+        #expect(assigned[2].hostPort == 8080)
+    }
+
     @Test("Create throws unsupported error")
     func testCreateUnsupported() async throws {
         let config = MockerConfig()
