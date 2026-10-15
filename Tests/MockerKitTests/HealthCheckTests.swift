@@ -76,12 +76,28 @@ struct HealthCheckTests {
         #expect(await probes.count == 3)
     }
 
+    @Test("An already healthy container passes without waiting an interval")
+    func healthyWithoutWaiting() async throws {
+        let probes = Probes([true])
+        let sleeps = Probes([])
+
+        let healthy = try await HealthCheck.waitUntilHealthy(
+            HealthCheck(command: ["true"], interval: 1, retries: 3),
+            probe: { await probes.next() },
+            sleep: { _ in _ = await sleeps.next() }
+        )
+
+        #expect(healthy)
+        #expect(await sleeps.count == 0)
+    }
+
     @Test("Unhealthy after `retries` failures in a row")
     func unhealthyAfterRetries() async throws {
         let probes = Probes([])
 
         #expect(try await !wait(HealthCheck(command: ["false"], interval: 1, retries: 3), probes))
-        #expect(await probes.count == 3)
+        // The first probe, before any interval, doesn't count.
+        #expect(await probes.count == 4)
     }
 
     @Test("Failures during start_period don't count")
@@ -89,6 +105,6 @@ struct HealthCheckTests {
         let probes = Probes([])
 
         #expect(try await !wait(HealthCheck(command: ["false"], interval: 1, retries: 3, startPeriod: 2), probes))
-        #expect(await probes.count == 5)
+        #expect(await probes.count == 6)
     }
 }

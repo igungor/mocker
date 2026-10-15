@@ -67,6 +67,12 @@ public struct HealthCheck: Sendable, Equatable {
         probe: @Sendable () async -> Bool,
         sleep: @Sendable (TimeInterval) async throws -> Void
     ) async throws -> Bool {
+        // An already healthy container, as most are on a later `up --wait`, passes
+        // without waiting out an interval: Docker answers from the status it keeps,
+        // and mocker keeps none. A failure here doesn't count, so an unhealthy
+        // container still gets Docker's `retries` probes, `interval` apart.
+        if await probe() { return true }
+
         var elapsed: TimeInterval = 0
         var failures = 0
         while true {
