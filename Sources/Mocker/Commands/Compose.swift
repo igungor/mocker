@@ -550,8 +550,9 @@ struct ComposeLogs: AsyncParsableCommand {
             targets = containers
         }
 
+        let tailLines = try ContainerEngine.tailLines(tail)
         for container in targets {
-            let lines = try await engine.logs(container.id, follow: follow)
+            let lines = try await engine.logs(container.id, follow: follow, tail: tailLines)
             for line in lines {
                 print(line)
             }
