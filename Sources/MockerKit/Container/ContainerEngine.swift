@@ -55,7 +55,7 @@ public actor ContainerEngine {
         let (output, exitCode) = try await runCLI(args)
 
         guard exitCode == 0 else {
-            let msg = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            let msg = Self.runtimeError(output)
             throw MockerError.operationFailed(msg.isEmpty ? "container run failed" : msg)
         }
 
@@ -72,6 +72,17 @@ public actor ContainerEngine {
         // left behind by an older mocker version.
 
         return info
+    }
+
+    /// The runtime's error from `container run` or `create` output, without the progress
+    /// lines (`[1/6] Fetching image [0s]`) it prints to the same stream, and without its
+    /// own `Error: ` prefix, which mocker adds again.
+    static func runtimeError(_ output: String) -> String {
+        output.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && $0.range(of: #"^\[\d+/\d+\]"#, options: .regularExpression) == nil }
+            .map { $0.hasPrefix("Error: ") ? String($0.dropFirst("Error: ".count)) : $0 }
+            .joined(separator: "\n")
     }
 
     /// Create the host folder of each bind mount that doesn't exist yet, as Docker does
@@ -139,7 +150,7 @@ public actor ContainerEngine {
 
         let (output, createCode) = try await runCLI(Self.buildRunArguments(name: name, config: containerConfig, subcommand: "create"))
         guard createCode == 0 else {
-            let msg = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            let msg = Self.runtimeError(output)
             throw MockerError.operationFailed(msg.isEmpty ? "container create failed" : msg)
         }
         try await store.save(try await fetchContainerInfo(id: name, name: name, config: containerConfig))
