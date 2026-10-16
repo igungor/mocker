@@ -42,6 +42,7 @@ public actor ContainerEngine {
 
     public func run(_ requested: ContainerConfig) async throws -> ContainerInfo {
         let containerConfig = try Self.assigningHostPorts(requested)
+        try Self.createMissingBindSources(containerConfig)
         let name = containerConfig.name ?? generateName()
 
         // Check for name conflicts in our store
@@ -71,6 +72,15 @@ public actor ContainerEngine {
         // left behind by an older mocker version.
 
         return info
+    }
+
+    /// Create the host folder of each bind mount that doesn't exist yet, as Docker does
+    /// for `-v` and compose's short syntax. The runtime refuses a missing source.
+    static func createMissingBindSources(_ config: ContainerConfig) throws {
+        for volume in config.volumes where volume.source.hasPrefix("/") {
+            guard !FileManager.default.fileExists(atPath: volume.source) else { continue }
+            try FileManager.default.createDirectory(atPath: volume.source, withIntermediateDirectories: true)
+        }
     }
 
     /// `requested` with a free host port for each mapping that left it to the runtime
@@ -121,6 +131,7 @@ public actor ContainerEngine {
         onStart: @escaping @Sendable (ContainerInfo) async -> Void = { _ in }
     ) async throws -> Int32 {
         let containerConfig = try Self.assigningHostPorts(requested)
+        try Self.createMissingBindSources(containerConfig)
         let name = containerConfig.name ?? generateName()
         if let existing = try await store.findByName(name) {
             throw MockerError.containerAlreadyExists(existing.name)

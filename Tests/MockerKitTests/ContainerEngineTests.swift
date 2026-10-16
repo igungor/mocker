@@ -5,6 +5,24 @@ import Foundation
 @Suite("ContainerEngine Tests")
 struct ContainerEngineTests {
 
+    @Test("A missing bind mount source is created as a folder; named volumes are left alone")
+    func createsMissingBindSources() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("mocker-bind-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let missing = root.appendingPathComponent("a/b").path
+        let config = ContainerConfig(image: "alpine", volumes: [
+            VolumeMount(source: missing, destination: "/data"),
+            VolumeMount(source: "named-volume", destination: "/named"),
+            VolumeMount(source: "", destination: "/anonymous"),
+        ])
+
+        try ContainerEngine.createMissingBindSources(config)
+
+        var isDirectory: ObjCBool = false
+        #expect(FileManager.default.fileExists(atPath: missing, isDirectory: &isDirectory) && isDirectory.boolValue)
+        #expect(!FileManager.default.fileExists(atPath: "named-volume"))
+    }
+
     @Test("A port left to the runtime gets a free host port; explicit ones stay")
     func assignsFreeHostPorts() throws {
         let config = ContainerConfig(image: "nginx", ports: [
