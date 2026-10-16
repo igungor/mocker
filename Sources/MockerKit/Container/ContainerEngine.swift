@@ -414,11 +414,26 @@ public actor ContainerEngine {
 
     public func logs(_ identifier: String, follow: Bool = false, tail: Int? = nil) async throws -> [String] {
         let container = try await resolve(identifier)
-        var args = ["logs", container.name]
-        if follow { args.append("-f") }
-
-        let (output, _) = try await runCLI(args)
+        let (output, _) = try await runCLI(Self.logsArguments(name: container.name, follow: follow, tail: tail))
         return output.components(separatedBy: "\n").filter { !$0.isEmpty }
+    }
+
+    /// `container logs` arguments. `tail` is the number of lines from the end, as
+    /// Docker's `--tail`, and nil for all of them.
+    static func logsArguments(name: String, follow: Bool, tail: Int?) -> [String] {
+        var args = ["logs", name]
+        if follow { args.append("-f") }
+        if let tail { args += ["-n", String(tail)] }
+        return args
+    }
+
+    /// Docker's `--tail` value: a number of lines, or `all`.
+    public static func tailLines(_ value: String?) throws -> Int? {
+        guard let value, value != "all" else { return nil }
+        guard let lines = Int(value), lines >= 0 else {
+            throw MockerError.operationFailed("invalid --tail value \"\(value)\": a number of lines or \"all\"")
+        }
+        return lines
     }
 
     // MARK: - Exec
