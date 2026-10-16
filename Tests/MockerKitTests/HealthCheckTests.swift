@@ -65,7 +65,7 @@ struct HealthCheckTests {
     }
 
     private func wait(_ check: HealthCheck, _ probes: Probes) async throws -> Bool {
-        try await HealthCheck.waitUntilHealthy(check, probe: { await probes.next() }, sleep: { _ in })
+        try await HealthCheck.waitUntilHealthy(check, probe: { await probes.next() }, sleep: { _ in }) == .healthy
     }
 
     @Test("Healthy as soon as a probe passes")
@@ -81,13 +81,13 @@ struct HealthCheckTests {
         let probes = Probes([true])
         let sleeps = Probes([])
 
-        let healthy = try await HealthCheck.waitUntilHealthy(
+        let outcome = try await HealthCheck.waitUntilHealthy(
             HealthCheck(command: ["true"], interval: 1, retries: 3),
             probe: { await probes.next() },
             sleep: { _ in _ = await sleeps.next() }
         )
 
-        #expect(healthy)
+        #expect(outcome == .healthy)
         #expect(await sleeps.count == 0)
     }
 
@@ -106,5 +106,51 @@ struct HealthCheckTests {
 
         #expect(try await !wait(HealthCheck(command: ["false"], interval: 1, retries: 3, startPeriod: 2), probes))
         #expect(await probes.count == 6)
+    }
+
+    @Test("A container that exits is reported at once, without waiting out the retries")
+    func exitedWithoutRetries() async throws {
+        let probes = Probes([false, false])
+        let running = Probes([true])
+
+        let outcome = try await HealthCheck.waitUntilHealthy(
+            HealthCheck(command: ["false"], interval: 1, retries: 60),
+            probe: { await probes.next() },
+            isRunning: { await running.next() },
+            sleep: { _ in }
+        )
+
+        #expect(outcome == .exited)
+        #expect(await probes.count == 2)
+    }
+
+    @Test("A container that already exited fails before the first interval")
+    func exitedBeforeFirstInterval() async throws {
+        let sleeps = Probes([])
+
+        let outcome = try await HealthCheck.waitUntilHealthy(
+            HealthCheck(command: ["false"], interval: 1, retries: 60),
+            probe: { false },
+            isRunning: { false },
+            sleep: { _ in _ = await sleeps.next() }
+        )
+
+        #expect(outcome == .exited)
+        #expect(await sleeps.count == 0)
+    }
+
+    @Test("A running container still gets every retry")
+    func runningGetsRetries() async throws {
+        let probes = Probes([])
+
+        let outcome = try await HealthCheck.waitUntilHealthy(
+            HealthCheck(command: ["false"], interval: 1, retries: 3),
+            probe: { await probes.next() },
+            isRunning: { true },
+            sleep: { _ in }
+        )
+
+        #expect(outcome == .unhealthy)
+        #expect(await probes.count == 4)
     }
 }

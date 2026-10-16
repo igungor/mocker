@@ -605,13 +605,20 @@ public actor ComposeOrchestrator {
             throw MockerError.operationFailed("dependency failed to start: container \(containerName) has no healthcheck configured")
         }
 
-        let healthy = try await HealthCheck.waitUntilHealthy(
+        let outcome = try await HealthCheck.waitUntilHealthy(
             check,
             probe: { await self.runHealthCheck(check, in: containerName) },
+            isRunning: { (try? await self.engine.list(all: false))?.contains { $0.name == containerName } ?? true },
             sleep: { try await Task.sleep(for: .seconds($0)) }
         )
-        guard healthy else {
+        switch outcome {
+        case .healthy:
+            return
+        case .unhealthy:
             throw MockerError.operationFailed("dependency failed to start: container \(containerName) is unhealthy")
+        case .exited:
+            // The runtime doesn't report exit codes, so unlike Docker the message has none.
+            throw MockerError.operationFailed("dependency failed to start: container \(containerName) exited")
         }
     }
 
