@@ -332,6 +332,8 @@ public actor ContainerEngine {
     // MARK: - List
 
     public func list(all: Bool = false) async throws -> [ContainerInfo] {
+        try await recordUntrackedComposeContainers()
+
         var containers = try await store.listAll()
         if let liveIDs = await liveIDs() {
             for i in containers.indices {
@@ -649,6 +651,63 @@ public actor ContainerEngine {
         guard let container = found else { throw MockerError.containerNotFound(identifier) }
         guard let liveIDs = await liveIDs() else { return container }
         return try await reconcile(container, liveIDs: liveIDs)
+    }
+
+    /// Record the compose containers the runtime has but the store doesn't. A compose
+    /// `up` stopped with Ctrl-C leaves them: the runtime still starts every container
+    /// it was asked for, but mocker exits before it saves them. Docker Compose finds a
+    /// project's containers by their labels, so its `down` removes them and its `up`
+    /// reuses them. With a record, mocker's do too.
+    private func recordUntrackedComposeContainers() async throws {
+        guard let (output, status) = try? await runCLI(["ls", "-a", "--format", "json"]), status == 0 else { return }
+
+        let known = Set(try await store.listAll().map(\.name))
+        for container in Self.untrackedComposeContainers(lsJSON: output, known: known) {
+            try await store.save(container)
+        }
+    }
+
+    /// The containers in `container ls --format json` output that compose created, by
+    /// their project label, and whose names aren't in `known`.
+    static func untrackedComposeContainers(lsJSON: String, known: Set<String>) -> [ContainerInfo] {
+        guard let data = lsJSON.data(using: .utf8),
+              let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [] }
+
+        return entries.compactMap { entry in
+            guard let cfg = entry["configuration"] as? [String: Any],
+                  let id = cfg["id"] as? String, !known.contains(id),
+                  let labels = cfg["labels"] as? [String: String],
+                  labels["com.mocker.compose.project"] != nil
+            else { return nil }
+
+            let image = (cfg["image"] as? [String: Any])?["reference"] as? String ?? ""
+            let ports = ((cfg["publishedPorts"] as? [[String: Any]]) ?? []).flatMap(Self.portMappings)
+            let config = ContainerConfig(name: id, image: image, ports: ports, labels: labels)
+            return decodeInspect(entry, id: id, name: id, config: config)
+        }
+    }
+
+    /// One `publishedPorts` entry of `container ls --format json`, which covers `count`
+    /// consecutive ports.
+    static func portMappings(_ published: [String: Any]) -> [PortMapping] {
+        guard let hostPort = (published["hostPort"] as? NSNumber)?.intValue,
+              let containerPort = (published["containerPort"] as? NSNumber)?.intValue
+        else { return [] }
+
+        let count = max((published["count"] as? NSNumber)?.intValue ?? 1, 1)
+        let portProtocol = PortProtocol(rawValue: published["proto"] as? String ?? "tcp") ?? .tcp
+        let address = published["hostAddress"] as? String
+        let hostIp = address == nil || address == "0.0.0.0" ? nil : address
+
+        return (0..<count).map { offset in
+            PortMapping(
+                hostPort: UInt16(hostPort + offset),
+                containerPort: UInt16(containerPort + offset),
+                portProtocol: portProtocol,
+                hostIp: hostIp
+            )
+        }
     }
 
     /// Names and IDs of running containers, or `nil` when the runtime could not be
