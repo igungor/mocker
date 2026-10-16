@@ -59,30 +59,39 @@ public struct HealthCheck: Sendable, Equatable {
         return covered == (text as NSString).length ? seconds : nil
     }
 
+    enum Outcome: Equatable {
+        case healthy, unhealthy, exited
+    }
+
     /// Run `probe` every `interval` until it passes. Failures during `startPeriod`
     /// don't count; after it, `retries` failures in a row mean the service is unhealthy.
-    /// - Returns: true when healthy, false when unhealthy.
+    /// A container that isn't running after a failed probe has exited, so it can't
+    /// become healthy: Docker Compose reports that at once instead of waiting out the
+    /// retries.
     static func waitUntilHealthy(
         _ check: HealthCheck,
         probe: @Sendable () async -> Bool,
+        isRunning: @Sendable () async -> Bool = { true },
         sleep: @Sendable (TimeInterval) async throws -> Void
-    ) async throws -> Bool {
+    ) async throws -> Outcome {
         // An already healthy container, as most are on a later `up --wait`, passes
         // without waiting out an interval: Docker answers from the status it keeps,
         // and mocker keeps none. A failure here doesn't count, so an unhealthy
         // container still gets Docker's `retries` probes, `interval` apart.
-        if await probe() { return true }
+        if await probe() { return .healthy }
+        if await !isRunning() { return .exited }
 
         var elapsed: TimeInterval = 0
         var failures = 0
         while true {
             try await sleep(check.interval)
             elapsed += check.interval
-            if await probe() { return true }
+            if await probe() { return .healthy }
+            if await !isRunning() { return .exited }
 
             if elapsed > check.startPeriod {
                 failures += 1
-                if failures >= check.retries { return false }
+                if failures >= check.retries { return .unhealthy }
             }
         }
     }
