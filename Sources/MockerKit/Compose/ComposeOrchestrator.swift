@@ -30,6 +30,7 @@ public actor ComposeOrchestrator {
     private let volumeManager: VolumeManager
     private let projectName: String
     private let projectDir: URL
+    private var hostsRefresh: Task<Void, Error>?
 
     public init(
         projectName: String,
@@ -196,42 +197,56 @@ public actor ComposeOrchestrator {
             }
         }
 
-        // Start services in dependency order
-        let order = composeFile.serviceOrder()
+        // Images first, one at a time, as Docker does: services that share one
+        // would otherwise pull it twice at once.
+        let order = composeFile.serviceOrder().filter { !skipSet.contains($0) }
+        for serviceName in order {
+            guard let service = composeFile.services[serviceName] else { continue }
+            try await ensureImage(for: service, forceBuild: build, noBuild: noBuild)
+        }
 
+        // Each service starts as soon as its own dependencies are ready, as in Docker
+        // Compose, so a slow one only holds up the services that depend on it. The
+        // order is topological, so a service's dependencies have tasks by its turn.
         let awaited = Self.servicesAwaitedForCompletion(composeFile)
         var completions: [String: Task<Int32, Error>] = [:]
+        var startups: [String: Task<Void, Error>] = [:]
 
-        for serviceName in order where !skipSet.contains(serviceName) {
+        for serviceName in order {
             guard let service = composeFile.services[serviceName] else { continue }
-            for dependency in service.dependsOn where service.dependsOnConditions[dependency] == "service_healthy" {
-                try await waitUntilHealthy(dependency, composeFile: composeFile)
-            }
-            for dependency in service.dependsOn where service.dependsOnConditions[dependency] == "service_completed_successfully" {
-                guard let exitCode = try await completions[dependency]?.value, exitCode != 0 else { continue }
-                throw MockerError.operationFailed("service \"\(dependency)\" didn't complete successfully: exit \(exitCode)")
-            }
+            let ready = dependenciesReady(of: service, composeFile: composeFile, startups: startups, completions: completions)
 
-            // A service others wait on to complete runs in the background until it
-            // exits, so its exit code is known when they need it.
             if awaited.contains(serviceName) {
-                let config = try await containerConfig(for: service, composeFile: composeFile, detach: detach, forceBuild: build, noBuild: noBuild)
-                completions[serviceName] = Task {
-                    try await engine.runToCompletion(config) { _ in
+                // Runs until it exits, so its exit code is known when others need it.
+                let completion = Task {
+                    try await ready.value
+                    let config = try await self.containerConfig(for: service, composeFile: composeFile, detach: detach)
+                    return try await self.engine.runToCompletion(config) { _ in
                         try? await self.refreshHostsFiles(composeFile)
                     }
                 }
-                events.append(.containerStarted("\(projectName)-\(service.name)-1"))
-                continue
+                completions[serviceName] = completion
+                startups[serviceName] = Task { _ = try await completion.value }
+            } else {
+                startups[serviceName] = Task {
+                    try await ready.value
+                    _ = try await self.engine.run(try await self.containerConfig(for: service, composeFile: composeFile, detach: detach))
+                    // Its own name now that it has an address, and its name for the others.
+                    try await self.refreshHostsFiles(composeFile)
+                }
             }
-
-            _ = try await startService(
-                service, composeFile: composeFile,
-                detach: detach, forceBuild: build, noBuild: noBuild
-            )
-            // Its own name now that it has an address, and its name for the others.
-            try await refreshHostsFiles(composeFile)
             events.append(.containerStarted("\(projectName)-\(service.name)-1"))
+        }
+
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for startup in startups.values { group.addTask { try await startup.value } }
+                try await group.waitForAll()
+            }
+        } catch {
+            startups.values.forEach { $0.cancel() }
+            completions.values.forEach { $0.cancel() }
+            throw error
         }
 
         // Containers started rather than recreated above have new addresses too.
@@ -505,6 +520,31 @@ public actor ComposeOrchestrator {
         return events
     }
 
+    /// A task that finishes once `service` may start: every dependency has started,
+    /// and is healthy or has completed when its condition asks for that.
+    private func dependenciesReady(
+        of service: ComposeService,
+        composeFile: ComposeFile,
+        startups: [String: Task<Void, Error>],
+        completions: [String: Task<Int32, Error>]
+    ) -> Task<Void, Error> {
+        Task {
+            for dependency in service.dependsOn {
+                try await startups[dependency]?.value
+                switch service.dependsOnConditions[dependency] {
+                case "service_healthy":
+                    try await self.waitUntilHealthy(dependency, composeFile: composeFile)
+                case "service_completed_successfully":
+                    if let exitCode = try await completions[dependency]?.value, exitCode != 0 {
+                        throw MockerError.operationFailed("service \"\(dependency)\" didn't complete successfully: exit \(exitCode)")
+                    }
+                default:
+                    break
+                }
+            }
+        }
+    }
+
     /// `up --wait`: block until every service is running, or healthy when it has a
     /// health check, or has completed when another service waits for that, as Docker
     /// Compose does. With a timeout, give up after `timeout` seconds.
@@ -685,7 +725,19 @@ public actor ComposeOrchestrator {
     }
 
     /// Update every running container's hosts file with its own name and the others'.
+    /// One at a time: services start at once, and a refresh that read the running
+    /// containers earlier would write an older list over a newer one.
     private func refreshHostsFiles(_ composeFile: ComposeFile) async throws {
+        let previous = hostsRefresh
+        let refresh = Task {
+            _ = try? await previous?.value
+            try await self.refreshHostsFilesNow(composeFile)
+        }
+        hostsRefresh = refresh
+        try await refresh.value
+    }
+
+    private func refreshHostsFilesNow(_ composeFile: ComposeFile) async throws {
         let running = try await runningServices()
         for (service, info) in running {
             let hostname = composeFile.services[service]?.hostname ?? info.name
@@ -705,33 +757,12 @@ public actor ComposeOrchestrator {
         forceBuild: Bool = false,
         noBuild: Bool = false
     ) async throws -> ContainerInfo {
-        try await engine.run(try await containerConfig(
-            for: service, composeFile: composeFile, detach: detach, forceBuild: forceBuild, noBuild: noBuild
-        ))
+        try await ensureImage(for: service, forceBuild: forceBuild, noBuild: noBuild)
+        return try await engine.run(try await containerConfig(for: service, composeFile: composeFile, detach: detach))
     }
 
-    /// Pull or build the service's image and return the config its container runs with.
-    private func containerConfig(
-        for service: ComposeService,
-        composeFile: ComposeFile = ComposeFile(),
-        detach: Bool,
-        forceBuild: Bool = false,
-        noBuild: Bool = false
-    ) async throws -> ContainerConfig {
-        let containerName = "\(projectName)-\(service.name)-1"
-
-        // Resolved once: it is both what the container joins and what is recorded on it,
-        // so a later change to the network is visible to the reconcile.
-        let resolvedNetwork = Self.networkForService(
-            service, composeFile: composeFile, projectName: projectName
-        )
-
-        if service.networks.count > 1 {
-            FileHandle.standardError.write(Data(
-                ("WARNING: service \(service.name) lists \(service.networks.count) networks; "
-                 + "the runtime attaches one, joining \(service.networks[0])\n").utf8))
-        }
-
+    /// Pull or build the service's image.
+    private func ensureImage(for service: ComposeService, forceBuild: Bool, noBuild: Bool) async throws {
         // Decide whether to build or pull. Per the Compose spec, a service with
         // both `image:` and `build:` is built and tagged with `image:` — not pulled.
         switch service.resolveImageSource(projectName: projectName, noBuild: noBuild) {
@@ -762,6 +793,27 @@ public actor ComposeOrchestrator {
             }
         case .none:
             break
+        }
+    }
+
+    /// The config the service's container runs with. Its image must exist.
+    private func containerConfig(
+        for service: ComposeService,
+        composeFile: ComposeFile = ComposeFile(),
+        detach: Bool
+    ) async throws -> ContainerConfig {
+        let containerName = "\(projectName)-\(service.name)-1"
+
+        // Resolved once: it is both what the container joins and what is recorded on it,
+        // so a later change to the network is visible to the reconcile.
+        let resolvedNetwork = Self.networkForService(
+            service, composeFile: composeFile, projectName: projectName
+        )
+
+        if service.networks.count > 1 {
+            FileHandle.standardError.write(Data(
+                ("WARNING: service \(service.name) lists \(service.networks.count) networks; "
+                 + "the runtime attaches one, joining \(service.networks[0])\n").utf8))
         }
 
         // Same helper the build path tags with, so run and build never disagree.
