@@ -825,16 +825,27 @@ public struct ComposeService: Sendable {
         return info.repository.hasSuffix(ref.repository) && info.tag == ref.tag
     }
 
-    private static func parseEnvironment(_ value: Any?) -> [String: String] {
+    /// `environment:` in either form. A variable without a value (`KEY:` or `- KEY`)
+    /// takes its value from the environment mocker runs in, and is left out when that
+    /// doesn't have it, as in Docker Compose. `- KEY=` is an empty value.
+    static func parseEnvironment(
+        _ value: Any?,
+        hostEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
         var env: [String: String] = [:]
         if let dict = value as? [String: Any] {
-            for (k, v) in dict { env[k] = "\(v)" }
-        } else if let list = value as? [String] {
-            for item in list {
-                let parts = item.split(separator: "=", maxSplits: 1)
-                if parts.count == 2 {
-                    env[String(parts[0])] = String(parts[1])
+            for (k, v) in dict {
+                if v is NSNull {
+                    env[k] = hostEnvironment[k]
+                } else {
+                    env[k] = "\(v)"
                 }
+            }
+        } else if let list = value as? [Any] {
+            for item in list {
+                let parts = "\(item)".split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                let key = String(parts[0])
+                env[key] = parts.count == 2 ? String(parts[1]) : hostEnvironment[key]
             }
         }
         return env
