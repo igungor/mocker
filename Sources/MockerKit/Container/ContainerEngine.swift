@@ -451,6 +451,8 @@ public actor ContainerEngine {
 
         try process.run()
         let pid = process.processIdentifier
+        StreamedProcesses.add(pid)
+        defer { StreamedProcesses.remove(pid) }
 
         try await withTaskCancellationHandler {
             for try await line in pipe.fileHandleForReading.bytes.lines {

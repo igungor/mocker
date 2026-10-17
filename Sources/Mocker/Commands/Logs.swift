@@ -30,6 +30,7 @@ struct Logs: AsyncParsableCommand {
 
     func run() async throws {
         let config = MockerConfig()
+        StreamedProcesses.stopOnSignal()
         let engine = try ContainerEngine(config: config)
         try await engine.streamLogs(container, follow: follow, tail: tail) { line in
             print(line)
