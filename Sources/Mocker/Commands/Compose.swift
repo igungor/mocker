@@ -550,6 +550,7 @@ struct ComposeLogs: AsyncParsableCommand {
             targets = containers
         }
 
+        StreamedProcesses.stopOnSignal()
         let tailLines = try ContainerEngine.tailLines(tail)
         let prefixes = noLogPrefix ? [:] : ComposeOrchestrator.logPrefixes(targets.map(\.name), projectName: project)
         let printer: @Sendable (String) -> @Sendable (String) -> Void = { name in

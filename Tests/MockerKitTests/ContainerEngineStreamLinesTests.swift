@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import MockerKit
 
-@Suite("ContainerEngine.streamLines Tests")
+@Suite("ContainerEngine.streamLines Tests", .serialized)
 struct ContainerEngineStreamLinesTests {
 
     private final class Lines: @unchecked Sendable {
@@ -45,5 +45,19 @@ struct ContainerEngineStreamLinesTests {
         _ = await stream.result
 
         #expect(lines.lines.count >= 1)
+    }
+
+    @Test("a streamed process is tracked while it runs, so a signal can stop it")
+    func trackedWhileRunning() async throws {
+        let before = StreamedProcesses.count
+
+        let stream = Task {
+            try await ContainerEngine.streamLines(executable: "/bin/sh", arguments: ["-c", "sleep 1"]) { _ in }
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(StreamedProcesses.count == before + 1)
+
+        _ = await stream.result
+        #expect(StreamedProcesses.count == before)
     }
 }
