@@ -343,7 +343,7 @@ public actor ContainerEngine {
     // MARK: - List
 
     public func list(all: Bool = false) async throws -> [ContainerInfo] {
-        try await recordUntrackedComposeContainers()
+        try await syncWithRuntime()
 
         var containers = try await store.listAll()
         if let liveIDs = await liveIDs() {
@@ -723,17 +723,54 @@ public actor ContainerEngine {
         return try await reconcile(container, liveIDs: liveIDs)
     }
 
-    /// Record the compose containers the runtime has but the store doesn't. A compose
-    /// `up` stopped with Ctrl-C leaves them: the runtime still starts every container
-    /// it was asked for, but mocker exits before it saves them. Docker Compose finds a
-    /// project's containers by their labels, so its `down` removes them and its `up`
-    /// reuses them. With a record, mocker's do too.
-    private func recordUntrackedComposeContainers() async throws {
+    /// Bring the store in line with the runtime, from one `container ls`:
+    /// - Record the compose containers the runtime has but the store doesn't. A compose
+    ///   `up` stopped with Ctrl-C leaves them: the runtime still starts every container
+    ///   it was asked for, but mocker exits before it saves them. Docker Compose finds a
+    ///   project's containers by their labels, so its `down` removes them and its `up`
+    ///   reuses them. With a record, mocker's do too.
+    /// - Take each container's address from the runtime. The one saved right after
+    ///   `container run` is empty when the runtime hadn't attached the network yet, as
+    ///   happens under load, and a container without one is left out of the others'
+    ///   hosts files.
+    private func syncWithRuntime() async throws {
         guard let (output, status) = try? await runCLI(["ls", "-a", "--format", "json"]), status == 0 else { return }
 
-        let known = Set(try await store.listAll().map(\.name))
-        for container in Self.untrackedComposeContainers(lsJSON: output, known: known) {
+        let stored = try await store.listAll()
+        for container in Self.untrackedComposeContainers(lsJSON: output, known: Set(stored.map(\.name))) {
             try await store.save(container)
+        }
+        for container in Self.withRuntimeAddresses(stored, addresses: Self.networkAddresses(lsJSON: output)) {
+            try await store.save(container)
+        }
+    }
+
+    /// Each container's IPv4 address in `container ls --format json` output, without
+    /// the prefix length. Containers without a network, such as stopped ones, are left out.
+    static func networkAddresses(lsJSON: String) -> [String: String] {
+        guard let data = lsJSON.data(using: .utf8),
+              let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [:] }
+
+        var addresses: [String: String] = [:]
+        for entry in entries {
+            guard let id = (entry["configuration"] as? [String: Any])?["id"] as? String,
+                  let networks = (entry["status"] as? [String: Any])?["networks"] as? [[String: Any]],
+                  let raw = networks.first?["ipv4Address"] as? String,
+                  let address = raw.split(separator: "/").first, !address.isEmpty
+            else { continue }
+            addresses[id] = String(address)
+        }
+        return addresses
+    }
+
+    /// The stored containers whose address differs from the runtime's, updated to it.
+    static func withRuntimeAddresses(_ stored: [ContainerInfo], addresses: [String: String]) -> [ContainerInfo] {
+        stored.compactMap { container in
+            guard let address = addresses[container.name], address != container.networkAddress else { return nil }
+            var updated = container
+            updated.networkAddress = address
+            return updated
         }
     }
 
