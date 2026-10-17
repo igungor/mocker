@@ -468,6 +468,21 @@ public actor ComposeOrchestrator {
         return containers.filter { Self.belongs($0, toProject: projectName) }
     }
 
+    /// The prefix `compose logs` puts before each container's lines, as Docker Compose
+    /// does: the name without the project, padded to the longest, then ` | `.
+    public nonisolated static func logPrefixes(_ containerNames: [String], projectName: String) -> [String: String] {
+        let shortNames = containerNames.map { name in
+            name.hasPrefix(projectName + "-") ? String(name.dropFirst(projectName.count + 1)) : name
+        }
+        let width = shortNames.map(\.count).max() ?? 0
+
+        var prefixes: [String: String] = [:]
+        for (name, short) in zip(containerNames, shortNames) {
+            prefixes[name] = short.padding(toLength: width, withPad: " ", startingAt: 0) + " | "
+        }
+        return prefixes
+    }
+
     /// Whether a container belongs to this project, by the label written when compose
     /// created it (since the first release, so every project container carries it).
     ///
