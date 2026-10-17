@@ -551,11 +551,27 @@ struct ComposeLogs: AsyncParsableCommand {
         }
 
         let tailLines = try ContainerEngine.tailLines(tail)
-        for container in targets {
-            let lines = try await engine.logs(container.id, follow: follow, tail: tailLines)
-            for line in lines {
-                print(line)
+        let printLine: @Sendable (String) -> Void = { line in
+            print(line)
+            fflush(stdout)
+        }
+
+        // Followed logs never end, so each container is followed at once, as Docker
+        // Compose does, instead of one after the other.
+        guard follow else {
+            for container in targets {
+                try await engine.streamLogs(container.id, tail: tailLines, onLine: printLine)
             }
+            return
+        }
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for container in targets {
+                group.addTask {
+                    try await engine.streamLogs(container.id, follow: true, tail: tailLines, onLine: printLine)
+                }
+            }
+            try await group.waitForAll()
         }
     }
 }

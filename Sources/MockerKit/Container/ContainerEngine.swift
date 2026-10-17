@@ -418,6 +418,50 @@ public actor ContainerEngine {
         return output.components(separatedBy: "\n").filter { !$0.isEmpty }
     }
 
+    /// Pass each log line to `onLine` as the runtime prints it, until the log ends:
+    /// at once without `follow`, and with it when the container stops or the task
+    /// is cancelled.
+    public func streamLogs(
+        _ identifier: String,
+        follow: Bool = false,
+        tail: Int? = nil,
+        onLine: @escaping @Sendable (String) -> Void
+    ) async throws {
+        let container = try await resolve(identifier)
+        try await Self.streamLines(
+            executable: Self.containerCLI,
+            arguments: Self.logsArguments(name: container.name, follow: follow, tail: tail),
+            onLine: onLine
+        )
+    }
+
+    /// Run `executable` and pass each line of its output to `onLine` as it comes,
+    /// instead of once the process exits.
+    static func streamLines(
+        executable: String,
+        arguments: [String],
+        onLine: @escaping @Sendable (String) -> Void
+    ) async throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        try process.run()
+        let pid = process.processIdentifier
+
+        try await withTaskCancellationHandler {
+            for try await line in pipe.fileHandleForReading.bytes.lines {
+                onLine(line)
+            }
+        } onCancel: {
+            kill(pid, SIGTERM)
+        }
+        process.waitUntilExit()
+    }
+
     /// `container logs` arguments. `tail` is the number of lines from the end, as
     /// Docker's `--tail`, and nil for all of them.
     static func logsArguments(name: String, follow: Bool, tail: Int?) -> [String] {

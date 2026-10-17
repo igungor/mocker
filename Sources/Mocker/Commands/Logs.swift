@@ -1,4 +1,5 @@
 import ArgumentParser
+import Foundation
 import MockerKit
 
 struct Logs: AsyncParsableCommand {
@@ -30,10 +31,9 @@ struct Logs: AsyncParsableCommand {
     func run() async throws {
         let config = MockerConfig()
         let engine = try ContainerEngine(config: config)
-        let lines = try await engine.logs(container, follow: follow, tail: tail)
-
-        for line in lines {
+        try await engine.streamLogs(container, follow: follow, tail: tail) { line in
             print(line)
+            fflush(stdout)
         }
     }
 }
