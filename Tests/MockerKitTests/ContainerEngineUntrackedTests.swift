@@ -66,6 +66,34 @@ struct ContainerEngineUntrackedTests {
         #expect(db.networkAddress == "192.168.65.2")
     }
 
+    @Test("reads each container's address, and skips the ones without a network")
+    func addresses() {
+        #expect(ContainerEngine.networkAddresses(lsJSON: lsJSON) == ["app-db-1": "192.168.65.2"])
+        #expect(ContainerEngine.networkAddresses(lsJSON: "ID IMAGE").isEmpty)
+    }
+
+    @Test("updates a stored container whose address is empty or differs from the runtime's")
+    func refreshesAddresses() {
+        let stored = [
+            ContainerInfo(id: "app-db-1", name: "app-db-1", image: "mysql", state: .running, status: "Up", created: Date(), ports: [], labels: [:], command: "", networkAddress: ""),
+            ContainerInfo(id: "app-web-1", name: "app-web-1", image: "nginx", state: .running, status: "Up", created: Date(), ports: [], labels: [:], command: "", networkAddress: "192.168.65.9"),
+            ContainerInfo(id: "app-cache-1", name: "app-cache-1", image: "valkey", state: .running, status: "Up", created: Date(), ports: [], labels: [:], command: "", networkAddress: "192.168.65.4"),
+        ]
+        let runtime = ["app-db-1": "192.168.65.2", "app-web-1": "192.168.65.3", "app-cache-1": "192.168.65.4"]
+
+        let updated = ContainerEngine.withRuntimeAddresses(stored, addresses: runtime)
+
+        #expect(updated.map(\.name) == ["app-db-1", "app-web-1"])
+        #expect(updated.map(\.networkAddress) == ["192.168.65.2", "192.168.65.3"])
+    }
+
+    @Test("keeps a stored address when the runtime has none, as for a stopped container")
+    func keepsAddressWithoutNetwork() {
+        let stored = [ContainerInfo(id: "app-db-1", name: "app-db-1", image: "mysql", state: .exited, status: "Exited", created: Date(), ports: [], labels: [:], command: "", networkAddress: "192.168.65.2")]
+
+        #expect(ContainerEngine.withRuntimeAddresses(stored, addresses: [:]).isEmpty)
+    }
+
     @Test("returns nothing for output that isn't a JSON list")
     func invalidOutput() {
         #expect(ContainerEngine.untrackedComposeContainers(lsJSON: "ID IMAGE", known: []).isEmpty)
