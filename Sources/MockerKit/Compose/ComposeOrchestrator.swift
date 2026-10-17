@@ -578,24 +578,48 @@ public actor ComposeOrchestrator {
         }
     }
 
+    /// Every service is checked at the same time, as Docker Compose does: one after the
+    /// other, each health check's round trip into its container added up, even when
+    /// every service was already healthy.
     private func waitUntilReady(_ composeFile: ComposeFile, completions: [String: Task<Int32, Error>]) async throws {
         let awaited = Self.servicesAwaitedForCompletion(composeFile)
-        for serviceName in composeFile.serviceOrder() {
-            guard let service = composeFile.services[serviceName] else { continue }
-            let containerName = "\(projectName)-\(serviceName)-1"
+        try await Self.checkAll(composeFile.serviceOrder()) { serviceName in
+            guard let service = composeFile.services[serviceName] else { return }
+            try await self.waitUntilReady(serviceName, service: service, awaited: awaited, completions: completions, composeFile: composeFile)
+        }
+    }
 
-            if awaited.contains(serviceName) {
-                if let exitCode = try await completions[serviceName]?.value, exitCode != 0 {
-                    throw MockerError.operationFailed("service \"\(serviceName)\" didn't complete successfully: exit \(exitCode)")
-                }
-            } else if let check = service.healthcheck, !check.isDisabled {
-                try await waitUntilHealthy(serviceName, composeFile: composeFile)
-            } else {
-                // Without a health check, running is enough. The runtime doesn't
-                // report exit codes, so unlike Docker the message has none.
-                let running = try await engine.list(all: false).contains { $0.name == containerName }
-                guard running else { throw MockerError.operationFailed("container \(containerName) exited") }
+    /// Run `check` for every name at the same time, and throw the first error.
+    nonisolated static func checkAll(_ names: [String], check: @escaping @Sendable (String) async throws -> Void) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for name in names {
+                group.addTask { try await check(name) }
             }
+            // Unlike `waitForAll`, this throws as soon as one check fails.
+            for try await _ in group {}
+        }
+    }
+
+    private func waitUntilReady(
+        _ serviceName: String,
+        service: ComposeService,
+        awaited: Set<String>,
+        completions: [String: Task<Int32, Error>],
+        composeFile: ComposeFile
+    ) async throws {
+        let containerName = "\(projectName)-\(serviceName)-1"
+
+        if awaited.contains(serviceName) {
+            if let exitCode = try await completions[serviceName]?.value, exitCode != 0 {
+                throw MockerError.operationFailed("service \"\(serviceName)\" didn't complete successfully: exit \(exitCode)")
+            }
+        } else if let check = service.healthcheck, !check.isDisabled {
+            try await waitUntilHealthy(serviceName, composeFile: composeFile)
+        } else {
+            // Without a health check, running is enough. The runtime doesn't
+            // report exit codes, so unlike Docker the message has none.
+            let running = try await engine.list(all: false).contains { $0.name == containerName }
+            guard running else { throw MockerError.operationFailed("container \(containerName) exited") }
         }
     }
 
