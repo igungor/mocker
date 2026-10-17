@@ -493,46 +493,42 @@ public actor ComposeOrchestrator {
         container.labels["com.mocker.compose.project"] == projectName
     }
 
-    /// Restart a specific service or all services.
-    public func restart(composeFile: ComposeFile, service: String? = nil) async throws -> [ComposeEvent] {
+    /// Restart a service's containers, or every service's, in place, as Docker Compose
+    /// does: the same containers are stopped and started again, so it doesn't apply
+    /// changes to the compose file (`up` does) and doesn't create missing containers.
+    /// - Parameter timeout: seconds to wait for each container to stop before it is killed.
+    public func restart(composeFile: ComposeFile, service: String? = nil, timeout: Int? = nil) async throws -> [ComposeEvent] {
         var events: [ComposeEvent] = []
-        let containers = try await ps()
-        let targets: [ContainerInfo]
+        let targets = Self.restartTargets(try await ps(), service: service, order: composeFile.serviceOrder(), projectName: projectName)
 
-        if let service {
-            // Exact service match: a `hasPrefix` here also restarted `web2`/`webhook`
-            // when asked for `web`, and restart stops and REMOVES what it selects.
-            targets = containers.filter { Self.belongs($0, to: service, projectName: projectName) }
-        } else {
-            targets = containers
-        }
-
-        // Stop and remove targets
         for container in targets {
             if container.state.isActive {
-                _ = try await engine.stop(container.id)
+                _ = try await engine.stop(container.id, timeout: timeout)
                 events.append(.containerStopped(container.name))
             }
-            _ = try await engine.remove(container.id)
-            events.append(.containerRemoved(container.name))
+            _ = try await engine.start(container.id)
+            events.append(.containerStarted(container.name))
         }
 
-        // Recreate services
-        if let service, let svc = composeFile.services[service] {
-            _ = try await startService(svc, composeFile: composeFile, detach: true)
-            events.append(.containerStarted("\(projectName)-\(service)-1"))
-        } else {
-            for serviceName in composeFile.serviceOrder() {
-                guard let svc = composeFile.services[serviceName] else { continue }
-                _ = try await startService(svc, composeFile: composeFile, detach: true)
-                events.append(.containerStarted("\(projectName)-\(serviceName)-1"))
-            }
-        }
-
-        // Restarted containers have new addresses, so every container's hostnames change.
+        // A restarted container can come back with a new address, so every container's
+        // hostnames change.
         try await refreshHostsFiles(composeFile)
 
         return events
+    }
+
+    /// The containers `restart` restarts: the service's, or every service's, in the
+    /// order services start in.
+    nonisolated static func restartTargets(
+        _ containers: [ContainerInfo],
+        service: String?,
+        order: [String],
+        projectName: String
+    ) -> [ContainerInfo] {
+        let services = service.map { [$0] } ?? order
+        return services.flatMap { name in
+            containers.filter { belongs($0, to: name, projectName: projectName) }
+        }
     }
 
     /// A task that finishes once `service` may start: every dependency has started,
@@ -770,17 +766,6 @@ public actor ComposeOrchestrator {
             let entries = [(name: hostname, address: info.networkAddress)] + others
             _ = try writeHostsFile(for: service, entries: entries, managed: Set(composeFile.services.keys).union([hostname]))
         }
-    }
-
-    private func startService(
-        _ service: ComposeService,
-        composeFile: ComposeFile = ComposeFile(),
-        detach: Bool,
-        forceBuild: Bool = false,
-        noBuild: Bool = false
-    ) async throws -> ContainerInfo {
-        try await ensureImage(for: service, forceBuild: forceBuild, noBuild: noBuild)
-        return try await engine.run(try await containerConfig(for: service, composeFile: composeFile, detach: detach))
     }
 
     /// Pull or build the service's image.
