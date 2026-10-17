@@ -674,7 +674,7 @@ struct ComposeRestart: AsyncParsableCommand {
             volumeManager: volumeManager
         )
 
-        let events = try await orchestrator.restart(composeFile: composeFile, service: service)
+        let events = try await orchestrator.restart(composeFile: composeFile, service: service, timeout: timeout)
         ComposeFormatter.printEvents(events, total: events.count)
     }
 }
