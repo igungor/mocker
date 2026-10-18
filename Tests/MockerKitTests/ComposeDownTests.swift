@@ -69,3 +69,26 @@ struct ComposeTearDownTests {
         #expect(await calls.log == ["remove app-db-1 force=true"])
     }
 }
+
+@Suite("ComposeOrchestrator.ready Tests")
+struct ComposeReadyTests {
+
+    private struct DependencyFailed: Error {}
+
+    @Test("waits for the old container's removal as well as the dependencies")
+    func waitsForRemoval() async throws {
+        let start = Date()
+        let removal = Task { _ = try? await Task.sleep(for: .milliseconds(300)) }
+
+        try await ComposeOrchestrator.ready(after: Task {}, removal: removal).value
+
+        #expect(Date().timeIntervalSince(start) >= 0.3)
+    }
+
+    @Test("fails when a dependency fails")
+    func dependencyFails() async {
+        await #expect(throws: DependencyFailed.self) {
+            try await ComposeOrchestrator.ready(after: Task { throw DependencyFailed() }, removal: nil).value
+        }
+    }
+}

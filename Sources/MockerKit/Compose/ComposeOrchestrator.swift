@@ -166,6 +166,7 @@ public actor ComposeOrchestrator {
             noRecreate: noRecreate
         )
         var skipSet: Set<String> = []
+        var removals: [String: Task<Void, Never>] = [:]
         for action in actions {
             switch action.kind {
             case .keep:
@@ -183,13 +184,11 @@ public actor ComposeOrchestrator {
                     events.append(.containerRunning(started.name))
                 }
             case .removeAndRecreate:
+                // In the background: a service's new container waits only for its own old
+                // one, so replacing a service overlaps with what it waits for, such as a build.
                 if let existing = observed.first(where: { $0.serviceName == action.serviceName }) {
-                    if let live = (try? await engine.list(all: true))?.first(where: { $0.name == existing.name }),
-                       live.state.isActive {
-                        _ = try? await engine.stop(live.id)
-                        events.append(.containerStopped(live.name))
-                    }
-                    _ = try? await engine.remove(existing.name, force: true)
+                    removals[action.serviceName] = Task { _ = try? await self.engine.remove(existing.name, force: true) }
+                    if existing.state.isActive { events.append(.containerStopped(existing.name)) }
                     events.append(.containerRemoved(existing.name))
                 }
             case .noOp:
@@ -200,9 +199,15 @@ public actor ComposeOrchestrator {
         // Images first, one at a time, as Docker does: services that share one
         // would otherwise pull it twice at once.
         let order = composeFile.serviceOrder().filter { !skipSet.contains($0) }
-        for serviceName in order {
-            guard let service = composeFile.services[serviceName] else { continue }
-            try await ensureImage(for: service, forceBuild: build, noBuild: noBuild)
+        do {
+            for serviceName in order {
+                guard let service = composeFile.services[serviceName] else { continue }
+                try await ensureImage(for: service, forceBuild: build, noBuild: noBuild)
+            }
+        } catch {
+            // Never exit with a container half removed.
+            for removal in removals.values { await removal.value }
+            throw error
         }
 
         // Each service starts as soon as its own dependencies are ready, as in Docker
@@ -214,7 +219,10 @@ public actor ComposeOrchestrator {
 
         for serviceName in order {
             guard let service = composeFile.services[serviceName] else { continue }
-            let ready = dependenciesReady(of: service, composeFile: composeFile, startups: startups, completions: completions)
+            let ready = Self.ready(
+                after: dependenciesReady(of: service, composeFile: composeFile, startups: startups, completions: completions),
+                removal: removals[serviceName]
+            )
 
             if awaited.contains(serviceName) {
                 // Runs until it exits, so its exit code is known when others need it.
@@ -246,6 +254,7 @@ public actor ComposeOrchestrator {
         } catch {
             startups.values.forEach { $0.cancel() }
             completions.values.forEach { $0.cancel() }
+            for removal in removals.values { await removal.value }
             throw error
         }
 
@@ -555,6 +564,15 @@ public actor ComposeOrchestrator {
         let services = service.map { [$0] } ?? order
         return services.flatMap { name in
             containers.filter { belongs($0, to: name, projectName: projectName) }
+        }
+    }
+
+    /// Ready once the dependencies are and the service's old container, removed in the
+    /// background, is gone: the new container takes its name.
+    nonisolated static func ready(after dependencies: Task<Void, Error>, removal: Task<Void, Never>?) -> Task<Void, Error> {
+        Task {
+            await removal?.value
+            try await dependencies.value
         }
     }
 
