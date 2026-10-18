@@ -272,13 +272,11 @@ public actor ComposeOrchestrator {
         var events: [ComposeEvent] = []
         let containers = try await ps()
 
-        for container in containers {
-            if container.state.isActive, try await Self.stopListed({ _ = try await engine.stop(container.id, timeout: timeout) }) {
-                events.append(.containerStopped(container.name))
-            }
-            _ = try await engine.remove(container.id)
-            events.append(.containerRemoved(container.name))
-        }
+        events += try await Self.tearDown(
+            containers,
+            stop: { [engine] in _ = try await engine.stop($0.id, timeout: timeout) },
+            remove: { [engine] in _ = try await engine.remove($0.id, force: $1) }
+        )
 
         // Remove networks. The backend can still consider a just-removed container
         // attached for a moment, so retry briefly instead of silently leaving the
@@ -351,6 +349,25 @@ public actor ComposeOrchestrator {
         } catch MockerError.containerNotRunning {
             return false
         }
+    }
+
+    /// Stops and removes the containers `down` listed. Each is removed by force, as Docker
+    /// Compose does: one an interrupted `up` was still starting can be running by now,
+    /// though it was listed as stopped.
+    nonisolated static func tearDown(
+        _ containers: [ContainerInfo],
+        stop: @Sendable (ContainerInfo) async throws -> Void,
+        remove: @Sendable (ContainerInfo, _ force: Bool) async throws -> Void
+    ) async throws -> [ComposeEvent] {
+        var events: [ComposeEvent] = []
+        for container in containers {
+            if container.state.isActive, try await stopListed({ try await stop(container) }) {
+                events.append(.containerStopped(container.name))
+            }
+            try await remove(container, true)
+            events.append(.containerRemoved(container.name))
+        }
+        return events
     }
 
     /// Whether a container belongs to `service` in this project. The label written at
