@@ -437,7 +437,7 @@ approach gives you a fully working Docker-compatible tool on macOS 26 today:
 - [x] `mocker build` — delegates to `container build` with live output
 - [x] `mocker stats` — real CPU% and memory from VM process
 - [x] Port mapping (`-p`) — userspace TCP proxy subprocess
-- [x] Registry authentication (`mocker login` / `mocker logout`, keychain-backed)
+- [x] Registry authentication (`mocker login` / `mocker logout`, keychain-backed; Amazon ECR tokens from the AWS CLI)
 - [ ] `mocker compose --scale`
 - [ ] MenuBar live container metrics (CPU, memory, logs)
 - [ ] Image layer size reporting

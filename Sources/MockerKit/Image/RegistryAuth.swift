@@ -8,6 +8,7 @@ import ContainerizationExtras
 /// manage entries here, and pull/push look them up automatically. This is separate
 /// from Apple's `container` CLI keychain, because mocker pulls images through the
 /// Containerization framework directly rather than shelling out to `container pull`.
+/// Amazon ECR registries get a fresh token from the AWS CLI first (see `ECRAuth`).
 public enum RegistryAuth {
     /// Keychain security domain that scopes all mocker registry credentials.
     static let securityDomain = "com.mocker.cli"
@@ -18,8 +19,13 @@ public enum RegistryAuth {
 
     /// Stored credentials for the registry hosting `reference`, or nil for anonymous access.
     /// `reference` should be a fully-qualified image reference (see `ImageManager.normalize`).
-    public static func resolve(for reference: String) -> Authentication? {
+    public static func resolve(for reference: String) async -> Authentication? {
         guard let host = try? Reference.parse(reference).resolvedDomain else { return nil }
+
+        if let ecr = await ECRAuth.authentication(for: host) {
+            return ecr
+        }
+
         return try? keychain.lookup(hostname: host)
     }
 
