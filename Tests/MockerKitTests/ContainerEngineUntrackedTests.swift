@@ -66,6 +66,13 @@ struct ContainerEngineUntrackedTests {
         #expect(db.networkAddress == "192.168.65.2")
     }
 
+    @Test("reads which containers run from the same listing")
+    func runningNames() {
+        #expect(ContainerEngine.runningNames(lsJSON: lsJSON) == ["app-db-1", "scratch"])
+        #expect(ContainerEngine.runningNames(lsJSON: "[]") == [])
+        #expect(ContainerEngine.runningNames(lsJSON: "ID IMAGE") == nil)
+    }
+
     @Test("reads each container's address, and skips the ones without a network")
     func addresses() {
         #expect(ContainerEngine.networkAddresses(lsJSON: lsJSON) == ["app-db-1": "192.168.65.2"])
