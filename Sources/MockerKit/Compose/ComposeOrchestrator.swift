@@ -1081,7 +1081,8 @@ extension ComposeOrchestrator {
         forceRecreate: Bool,
         noRecreate: Bool
     ) -> [ReconcileAction] {
-        composeFile.serviceOrder().compactMap { serviceName -> ReconcileAction? in
+        let awaited = servicesAwaitedForCompletion(composeFile)
+        return composeFile.serviceOrder().compactMap { serviceName -> ReconcileAction? in
             guard let service = composeFile.services[serviceName] else { return nil }
             let observed = observedContainers.first { $0.serviceName == serviceName }
             let kind: ReconcileAction.Kind
@@ -1106,6 +1107,11 @@ extension ComposeOrchestrator {
                     // and never joined one: they need recreating to land on the project's.
                     kind = .removeAndRecreate
                 } else if let digest = obs.imageDigest, digest != service.image {
+                    kind = .removeAndRecreate
+                } else if awaited.contains(serviceName) {
+                    // Others wait for this one to complete, so it runs again, as Docker Compose
+                    // runs an exited one again. Kept or started in place, it would leave them
+                    // nothing to wait for, and they would start on what its last run left.
                     kind = .removeAndRecreate
                 } else {
                     kind = obs.state == .running ? .keep : .start
