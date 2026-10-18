@@ -440,6 +440,35 @@ struct ComposeOrchestratorTests {
         #expect(actions == [ReconcileAction(serviceName: "app", kind: .keep)])
     }
 
+    @Test("A one-shot service others wait to complete runs again, exited or still running", arguments: [ContainerState.exited, .running])
+    func reconcileRerunsAwaitedOneShot(state: ContainerState) throws {
+        let file = try ComposeFile.parse("""
+        services:
+          builder:
+            image: golang:alpine
+          app:
+            image: alpine
+            depends_on:
+              builder:
+                condition: service_completed_successfully
+        """)
+        let actions = ComposeOrchestrator.reconcileDecision(
+            observedContainers: ["builder", "app"].map { name in
+                observed(name: "proj-\(name)-1", serviceName: name,
+                         configHash: ComposeService.hash(of: file.services[name]!), state: state)
+            },
+            composeFile: file,
+            projectName: "proj",
+            forceRecreate: false,
+            noRecreate: false
+        )
+
+        // Kept or started in place, it leaves app nothing to wait for, so app starts on
+        // whatever the last run built, even when that run failed.
+        #expect(actions.first { $0.serviceName == "builder" }?.kind == .removeAndRecreate)
+        #expect(actions.first { $0.serviceName == "app" }?.kind == (state == .running ? .keep : .start))
+    }
+
     @Test("reconcileDecision: observed container matches hash + --force-recreate → .removeAndRecreate")
     func reconcileForceRecreateOverridesKeep() throws {
         let file = try singleServiceFile()
