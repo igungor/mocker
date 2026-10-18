@@ -343,12 +343,12 @@ public actor ContainerEngine {
     // MARK: - List
 
     public func list(all: Bool = false) async throws -> [ContainerInfo] {
-        try await syncWithRuntime()
+        let running = try await syncWithRuntime()
 
         var containers = try await store.listAll()
-        if let liveIDs = await liveIDs() {
+        if let running {
             for i in containers.indices {
-                containers[i] = try await reconcile(containers[i], liveIDs: liveIDs)
+                containers[i] = try await reconcile(containers[i], liveIDs: running)
             }
         }
 
@@ -735,8 +735,11 @@ public actor ContainerEngine {
     ///   `container run` is empty when the runtime hadn't attached the network yet, as
     ///   happens under load, and a container without one is left out of the others'
     ///   hosts files.
-    private func syncWithRuntime() async throws {
-        guard let (output, status) = try? await runCLI(["ls", "-a", "--format", "json"]), status == 0 else { return }
+    ///
+    /// Returns the running containers from the same listing, so callers don't ask the
+    /// runtime a second time, or `nil` when it couldn't be asked.
+    private func syncWithRuntime() async throws -> Set<String>? {
+        guard let (output, status) = try? await runCLI(["ls", "-a", "--format", "json"]), status == 0 else { return nil }
 
         let stored = try await store.listAll()
         for container in Self.untrackedComposeContainers(lsJSON: output, known: Set(stored.map(\.name))) {
@@ -745,6 +748,20 @@ public actor ContainerEngine {
         for container in Self.withRuntimeAddresses(stored, addresses: Self.networkAddresses(lsJSON: output)) {
             try await store.save(container)
         }
+        return Self.runningNames(lsJSON: output)
+    }
+
+    /// The names of the containers `container ls --format json` output reports running,
+    /// or `nil` when the output isn't a JSON list.
+    static func runningNames(lsJSON: String) -> Set<String>? {
+        guard let data = lsJSON.data(using: .utf8),
+              let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return nil }
+
+        return Set(entries.compactMap { entry in
+            guard (entry["status"] as? [String: Any])?["state"] as? String == "running" else { return nil }
+            return (entry["configuration"] as? [String: Any])?["id"] as? String
+        })
     }
 
     /// Each container's IPv4 address in `container ls --format json` output, without
