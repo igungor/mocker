@@ -273,8 +273,7 @@ public actor ComposeOrchestrator {
         let containers = try await ps()
 
         for container in containers {
-            if container.state.isActive {
-                _ = try await engine.stop(container.id, timeout: timeout)
+            if container.state.isActive, try await Self.stopListed({ _ = try await engine.stop(container.id, timeout: timeout) }) {
                 events.append(.containerStopped(container.name))
             }
             _ = try await engine.remove(container.id)
@@ -340,6 +339,18 @@ public actor ComposeOrchestrator {
         try? FileManager.default.removeItem(at: hostsDirectory)
 
         return events
+    }
+
+    /// Stops a container that was running when it was listed, and says whether it stopped
+    /// it. One that exited on its own since, such as a one-shot service finishing while
+    /// `down` stops the others, is already stopped: Docker Compose goes on, and so does this.
+    nonisolated static func stopListed(_ stop: @Sendable () async throws -> Void) async throws -> Bool {
+        do {
+            try await stop()
+            return true
+        } catch MockerError.containerNotRunning {
+            return false
+        }
     }
 
     /// Whether a container belongs to `service` in this project. The label written at
@@ -502,8 +513,7 @@ public actor ComposeOrchestrator {
         let targets = Self.restartTargets(try await ps(), service: service, order: composeFile.serviceOrder(), projectName: projectName)
 
         for container in targets {
-            if container.state.isActive {
-                _ = try await engine.stop(container.id, timeout: timeout)
+            if container.state.isActive, try await Self.stopListed({ _ = try await engine.stop(container.id, timeout: timeout) }) {
                 events.append(.containerStopped(container.name))
             }
             _ = try await engine.start(container.id)
