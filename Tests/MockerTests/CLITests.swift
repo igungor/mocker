@@ -397,6 +397,13 @@ struct CLITests {
         #expect(command.command == ["ls", "-la"])
     }
 
+    @Test("Compose exec keeps STDIN open by default, as Docker Compose does")
+    func composeExecKeepsStdinOpen() throws {
+        #expect(try ComposeExec.parse(["svc", "cat"]).interactive)
+        #expect(try ComposeExec.parse(["-T", "svc", "cat"]).interactive)
+        #expect(try !ComposeExec.parse(["--no-interactive", "svc", "cat"]).interactive)
+    }
+
     @Test("Compose exec strips leading -- terminator")
     func composeExecStripsLeadingDoubleDash() throws {
         var command = try ComposeExec.parse(["svc", "--", "ls", "-la"])

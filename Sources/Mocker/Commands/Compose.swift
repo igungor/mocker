@@ -917,8 +917,9 @@ struct ComposeExec: AsyncParsableCommand {
     @Flag(name: .shortAndLong, help: "Detached mode")
     var detach = false
 
-    @Flag(name: .short, help: "Keep STDIN open")
-    var interactive = false
+    /// On by default, as in Docker Compose, so a pipe into `compose exec` reaches the command.
+    @Flag(name: [.customShort("i"), .long], inversion: .prefixedNo, help: "Keep STDIN open")
+    var interactive = true
 
     @Flag(name: .short, help: "Allocate a pseudo-TTY")
     var tty = false
