@@ -257,7 +257,7 @@ public actor ImageManager {
         tag: String, dockerfilePath: String, context: String, noCache: Bool = false,
         buildArgs: [String] = [], platforms: [String] = [], target: String? = nil,
         labels: [String] = [], quiet: Bool = false, progress: String? = nil,
-        output: [String] = [], builder: String? = nil
+        output: [String] = [], builder: String? = nil, ssh: [String] = []
     ) -> [String] {
         var args = ["build", "-t", tag, "-f", dockerfilePath]
         if noCache { args.append("--no-cache") }
@@ -269,6 +269,7 @@ public actor ImageManager {
         if let progress { args += ["--progress", progress] }
         for o in output { args += ["-o", o] }
         if let builder, !builder.isEmpty { args += ["--builder", builder] }
+        for s in ssh { args += ["--ssh", s] }
         args.append(context)
         return args
     }
@@ -300,7 +301,7 @@ public actor ImageManager {
     /// - Parameter platforms: pass multiple values to build a multi-arch manifest list (e.g. `["linux/amd64", "linux/arm64"]`).
     /// - Parameter builder: optional named builder instance forwarded to `container build --builder`,
     ///   enabling a remote BuildKit node for exotic architectures (apple/container#1496).
-    public func build(tag: String, context: String, dockerfile: String? = nil, noCache: Bool = false, buildArgs: [String] = [], platforms: [String] = [], target: String? = nil, labels: [String] = [], quiet: Bool = false, progress: String? = nil, output: [String] = [], builder: String? = nil) async throws -> ImageInfo {
+    public func build(tag: String, context: String, dockerfile: String? = nil, noCache: Bool = false, buildArgs: [String] = [], platforms: [String] = [], target: String? = nil, labels: [String] = [], quiet: Bool = false, progress: String? = nil, output: [String] = [], builder: String? = nil, ssh: [String] = []) async throws -> ImageInfo {
         let absContext = Self.resolveContextPath(context: context, cwd: FileManager.default.currentDirectoryPath)
         let dockerfilePath = Self.resolveDockerfilePath(
             context: absContext,
@@ -315,7 +316,7 @@ public actor ImageManager {
         let args = Self.makeBuildArguments(
             tag: tag, dockerfilePath: dockerfilePath, context: context, noCache: noCache,
             buildArgs: buildArgs, platforms: platforms, target: target, labels: labels,
-            quiet: quiet, progress: progress, output: output, builder: builder
+            quiet: quiet, progress: progress, output: output, builder: builder, ssh: ssh
         )
 
         let process = Process()

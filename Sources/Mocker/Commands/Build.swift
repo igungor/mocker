@@ -113,7 +113,7 @@ struct Build: AsyncParsableCommand {
     @Option(name: .customLong("shm-size"), help: "Size of /dev/shm")
     var shmSize: String?
 
-    @Option(name: .long, parsing: .singleValue, help: "SSH agent socket or keys to expose to the build")
+    @Option(name: .long, parsing: .singleValue, help: "Forward the SSH agent to the build (format: default)")
     var ssh: [String] = []
 
     @Option(name: .long, parsing: .singleValue, help: "Ulimit options")
@@ -131,7 +131,7 @@ struct Build: AsyncParsableCommand {
             tag: tag, context: context, dockerfile: file, noCache: noCache,
             buildArgs: buildArg, platforms: platform, target: target,
             labels: label, quiet: quiet, progress: progress, output: output,
-            builder: builder
+            builder: builder, ssh: ssh
         )
         // The build can succeed while the image is not readable from our store; report
         // the tag rather than an empty ID in that case.
