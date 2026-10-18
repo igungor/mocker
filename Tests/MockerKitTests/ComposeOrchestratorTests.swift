@@ -214,6 +214,23 @@ struct ComposeOrchestratorTests {
 
     // MARK: - Service hostnames
 
+    @Test("A container finds itself by its service name too, as Docker's DNS answers both")
+    func hostsListOwnServiceName() {
+        let entries = ComposeOrchestrator.hostsEntries(
+            service: "kafka", hostname: "proj-kafka-1", address: "10.0.0.5", others: [("web", "10.0.0.4"), ("db", "10.0.0.2")]
+        )
+        let hosts = ComposeOrchestrator.updatedHosts(nil, entries: entries, managed: ["kafka", "web", "db", "proj-kafka-1"])
+
+        #expect(hosts == "127.0.0.1 localhost\n10.0.0.5 proj-kafka-1\n10.0.0.5 kafka\n10.0.0.2 db\n10.0.0.4 web\n")
+    }
+
+    @Test("A hostname that is the service name is listed once")
+    func hostsListOwnNameOnce() {
+        let entries = ComposeOrchestrator.hostsEntries(service: "db", hostname: "db", address: "10.0.0.2", others: [])
+
+        #expect(entries.map(\.name) == ["db"])
+    }
+
     @Test("A new hosts file has localhost and the given services")
     func newHostsFile() {
         let hosts = ComposeOrchestrator.updatedHosts(nil, entries: [("db", "10.0.0.2"), ("web", "10.0.0.4")], managed: ["db", "web"])

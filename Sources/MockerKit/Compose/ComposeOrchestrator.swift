@@ -725,6 +725,21 @@ public actor ComposeOrchestrator {
             .appendingPathComponent("hosts")
     }
 
+    /// What a service's hosts file lists: its own hostname and its service name, since
+    /// Docker's DNS answers a container for both, then the other services.
+    nonisolated static func hostsEntries(
+        service: String,
+        hostname: String,
+        address: String,
+        others: [(name: String, address: String)]
+    ) -> [(name: String, address: String)] {
+        var own = [(name: hostname, address: address)]
+        if service != hostname {
+            own.append((name: service, address: address))
+        }
+        return own + others.sorted { $0.name < $1.name }
+    }
+
     /// `current` /etc/hosts updated to map each of `entries` and nothing else under the
     /// `managed` names. Lines that stay keep their place and new ones go at the end:
     /// the container caches the file's size for a moment, so content that moved past
@@ -813,8 +828,7 @@ public actor ComposeOrchestrator {
             let others = running
                 .filter { $0.service != service }
                 .map { (name: $0.service, address: $0.info.networkAddress) }
-                .sorted { $0.name < $1.name }
-            let entries = [(name: hostname, address: info.networkAddress)] + others
+            let entries = Self.hostsEntries(service: service, hostname: hostname, address: info.networkAddress, others: others)
             _ = try writeHostsFile(for: service, entries: entries, managed: Set(composeFile.services.keys).union([hostname]))
         }
     }
