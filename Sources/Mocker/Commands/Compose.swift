@@ -1097,18 +1097,19 @@ struct ComposeRun: AsyncParsableCommand {
             environment: environment,
             detach: detach,
             workingDir: workdir,
-            entrypoint: entrypoint
+            entrypoint: entrypoint,
+            rm: rm
         )
 
-        let container = try await engine.run(containerConfig)
         if detach {
+            let container = try await engine.run(containerConfig)
             print(container.id)
-        } else {
-            let lines = try await engine.logs(container.id)
-            for line in lines { print(line) }
-            if rm {
-                _ = try? await engine.remove(container.id, force: true)
-            }
+            return
+        }
+
+        let exitCode = try await engine.runAttached(containerConfig)
+        if exitCode != 0 {
+            throw ExitCode(exitCode)
         }
     }
 }

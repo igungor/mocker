@@ -253,6 +253,50 @@ struct ContainerEngineTests {
         #expect(args.suffix(3) == ["alpine", "echo", "hi"])
     }
 
+    @Test("Run arguments always detach, interactive or not")
+    func testRunArgumentsAlwaysDetach() {
+        let interactive = ContainerConfig(image: "alpine", detach: true, interactive: true, tty: true)
+        let args = ContainerEngine.buildRunArguments(name: "bg", config: interactive)
+
+        #expect(args.contains("-d"))
+        #expect(args.contains("-i"))
+        #expect(args.contains("-t"))
+    }
+
+    @Test("An attached run stays attached, without progress output, and keeps --rm")
+    func testAttachedRunArguments() {
+        let config = ContainerConfig(image: "alpine", command: ["echo", "hi"], rm: true)
+        let args = ContainerEngine.buildRunArguments(name: "job", config: config, attached: true)
+
+        #expect(args.first == "run")
+        #expect(!args.contains("-d"))
+        #expect(args.contains("--rm"))
+        #expect(args[args.firstIndex(of: "--progress")! + 1] == "none")
+        #expect(args.suffix(3) == ["alpine", "echo", "hi"])
+    }
+
+    @Test("A wait status becomes the exit code a shell reports")
+    func testExitCodeFromWaitStatus() {
+        #expect(AttachedProcess.exitCode(fromWaitStatus: 0) == 0)
+        #expect(AttachedProcess.exitCode(fromWaitStatus: 3 << 8) == 3)
+        #expect(AttachedProcess.exitCode(fromWaitStatus: SIGKILL) == 137)
+    }
+
+    @Test("A spawned process reports its exit code, and gets no stdin unless asked")
+    func testSpawnAndWait() async throws {
+        let pid = try AttachedProcess.spawn(
+            "/bin/sh", ["-c", "read line && exit 9; exit 4"], ownProcessGroup: true, inheritStdin: false)
+
+        #expect(await AttachedProcess.wait(pid) == 4)
+    }
+
+    @Test("Relayed signals are named the way container kill takes them")
+    func testSignalNames() {
+        #expect(SignalRelay.name(of: SIGINT) == "SIGINT")
+        #expect(SignalRelay.name(of: SIGTERM) == "SIGTERM")
+        #expect(SignalRelay.name(of: SIGHUP) == "SIGHUP")
+    }
+
     @Test("Run arguments omit -m when memory is unset")
     func testRunArgumentsOmitMemoryWhenUnset() {
         let config = ContainerConfig(image: "alpine")

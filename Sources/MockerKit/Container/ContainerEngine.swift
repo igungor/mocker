@@ -186,7 +186,82 @@ public actor ContainerEngine {
         return exitCode
     }
 
-    static func buildRunArguments(name: String, config containerConfig: ContainerConfig, subcommand: String = "run") -> [String] {
+    /// Run a container in the foreground, as `docker run` without `-d` does: its output
+    /// goes straight to mocker's, and mocker waits for it to exit. A detached run plus
+    /// one `logs` call cut long output short, lost the exit code, and failed with
+    /// `--rm`, since the runtime had removed the container by the time logs were read.
+    /// - Parameter forwardSignals: send the SIGINT, SIGTERM and SIGHUP mocker gets to the
+    ///   container, as Docker's `--sig-proxy` does. When false, they detach from the
+    ///   container and leave it running.
+    /// - Returns: the container's exit code.
+    public func runAttached(_ requested: ContainerConfig, forwardSignals: Bool = true) async throws -> Int32 {
+        let containerConfig = try Self.assigningHostPorts(requested)
+        try Self.createMissingBindSources(containerConfig)
+        let name = containerConfig.name ?? generateName()
+        if let existing = try await store.findByName(name) {
+            throw MockerError.containerAlreadyExists(existing.name)
+        }
+
+        // Stored before it starts so that `mocker ps` lists it while it runs; listing
+        // takes its state from the runtime.
+        try await store.save(ContainerInfo(
+            id: name,
+            name: name,
+            image: containerConfig.image,
+            state: .created,
+            status: ContainerState.created.displayString,
+            created: Date(),
+            ports: containerConfig.ports,
+            labels: containerConfig.labels,
+            command: containerConfig.command.joined(separator: " ")
+        ))
+
+        // A non-interactive run gets its own process group, so Ctrl-C reaches only
+        // mocker: the runtime's own forwarding fails (apple/container#1941) and prints an
+        // error instead. An interactive one needs the terminal, so it stays in mocker's.
+        let interactive = containerConfig.interactive
+        let pid: pid_t
+        do {
+            pid = try AttachedProcess.spawn(
+                Self.containerCLI,
+                Self.buildRunArguments(name: name, config: containerConfig, attached: true),
+                ownProcessGroup: !interactive,
+                inheritStdin: interactive
+            )
+        } catch {
+            try? await store.delete(name)
+            throw error
+        }
+
+        let cli = Self.containerCLI
+        let relay = SignalRelay { signal in
+            if forwardSignals {
+                AttachedProcess.runQuietly(cli, ["kill", "--signal", SignalRelay.name(of: signal), name])
+            } else {
+                kill(pid, SIGKILL)
+                exit(128 + signal)
+            }
+        }
+        let exitCode = await AttachedProcess.wait(pid)
+        relay.cancel()
+
+        // Not there when the runtime removed it (`--rm`) or never created it.
+        if !containerConfig.rm, let finished = await inspectRuntime(name: name, config: containerConfig) {
+            try await store.save(finished)
+        } else {
+            try await store.delete(name)
+        }
+        return exitCode
+    }
+
+    /// - Parameter attached: for `run`, stay attached until the container exits, without
+    ///   the runtime's progress output, instead of detaching.
+    static func buildRunArguments(
+        name: String,
+        config containerConfig: ContainerConfig,
+        subcommand: String = "run",
+        attached: Bool = false
+    ) -> [String] {
         var args = [subcommand]
 
         args += ["--name", name]
@@ -289,9 +364,10 @@ public actor ContainerEngine {
             args += ["--kernel", kernel]
         }
 
-        // Detach by default unless interactive
-        if subcommand == "run" && !containerConfig.interactive {
-            args += ["-d"]
+        // A detached `run`'s output is read as the new container's ID, so `run` only
+        // stays attached when asked to (see `runAttached`).
+        if subcommand == "run" {
+            args += attached ? ["--progress", "none"] : ["-d"]
         }
 
         args.append(containerConfig.image)
@@ -863,13 +939,7 @@ public actor ContainerEngine {
     }
 
     private func fetchContainerInfo(id: String, name: String, config: ContainerConfig) async throws -> ContainerInfo {
-        let (output, _) = try await runCLI(["inspect", name])
-
-        // Parse JSON from container inspect
-        if let data = output.data(using: .utf8),
-           let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-           let first = arr.first,
-           let info = ContainerEngine.decodeInspect(first, id: id, name: name, config: config) {
+        if let info = await inspectRuntime(name: name, id: id, config: config) {
             return info
         }
 
@@ -886,6 +956,17 @@ public actor ContainerEngine {
             command: config.command.joined(separator: " "),
             networkAddress: ""
         )
+    }
+
+    /// The container as the runtime reports it, or nil when the runtime doesn't have it.
+    private func inspectRuntime(name: String, id: String? = nil, config: ContainerConfig) async -> ContainerInfo? {
+        guard let (output, _) = try? await runCLI(["inspect", name]),
+              let data = output.data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              let first = arr.first
+        else { return nil }
+
+        return ContainerEngine.decodeInspect(first, id: id ?? name, name: name, config: config)
     }
 
     static func parseLSOutput(_ output: String) -> Set<String> {
