@@ -88,6 +88,24 @@ struct ImageManagerBuildArgsTests {
         #expect(args.last == "ctx")
     }
 
+    @Test("--ssh is omitted when not provided")
+    func sshOmittedByDefault() {
+        let args = ImageManager.makeBuildArguments(
+            tag: "myapp:latest", dockerfilePath: "/ctx/Dockerfile", context: "."
+        )
+        #expect(!args.contains("--ssh"))
+    }
+
+    @Test("--ssh is forwarded before the context")
+    func sshForwarded() {
+        let args = ImageManager.makeBuildArguments(
+            tag: "myapp:latest", dockerfilePath: "/ctx/Dockerfile", context: ".",
+            ssh: ["default"]
+        )
+        #expect(adjacent(args, "--ssh", "default"))
+        #expect(args.last == ".")
+    }
+
     /// Helper: assert `flag` is immediately followed by `value` somewhere in `args`.
     private func adjacent(_ args: [String], _ flag: String, _ value: String) -> Bool {
         for (i, a) in args.enumerated() where a == flag {
