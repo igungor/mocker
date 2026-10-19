@@ -40,7 +40,9 @@ public actor ContainerEngine {
 
     // MARK: - Run
 
-    public func run(_ requested: ContainerConfig) async throws -> ContainerInfo {
+    /// - Parameter runtimeImage: the name to hand the runtime when it differs from the
+    ///   image the container records, e.g. a stored name for an image given by its ID.
+    public func run(_ requested: ContainerConfig, runtimeImage: String? = nil) async throws -> ContainerInfo {
         let containerConfig = try Self.assigningHostPorts(requested)
         try Self.createMissingBindSources(containerConfig)
         let name = containerConfig.name ?? generateName()
@@ -50,7 +52,11 @@ public actor ContainerEngine {
             throw MockerError.containerAlreadyExists(existing.name)
         }
 
-        let args = Self.buildRunArguments(name: name, config: containerConfig)
+        var runtimeConfig = containerConfig
+        if let runtimeImage {
+            runtimeConfig.image = runtimeImage
+        }
+        let args = Self.buildRunArguments(name: name, config: runtimeConfig)
 
         let (output, exitCode) = try await runCLI(args)
 
@@ -193,8 +199,13 @@ public actor ContainerEngine {
     /// - Parameter forwardSignals: send the SIGINT, SIGTERM and SIGHUP mocker gets to the
     ///   container, as Docker's `--sig-proxy` does. When false, they detach from the
     ///   container and leave it running.
+    /// - Parameter runtimeImage: the name to hand the runtime, as in `run`.
     /// - Returns: the container's exit code.
-    public func runAttached(_ requested: ContainerConfig, forwardSignals: Bool = true) async throws -> Int32 {
+    public func runAttached(
+        _ requested: ContainerConfig,
+        runtimeImage: String? = nil,
+        forwardSignals: Bool = true
+    ) async throws -> Int32 {
         let containerConfig = try Self.assigningHostPorts(requested)
         try Self.createMissingBindSources(containerConfig)
         let name = containerConfig.name ?? generateName()
@@ -220,11 +231,15 @@ public actor ContainerEngine {
         // mocker: the runtime's own forwarding fails (apple/container#1941) and prints an
         // error instead. An interactive one needs the terminal, so it stays in mocker's.
         let interactive = containerConfig.interactive
+        var runtimeConfig = containerConfig
+        if let runtimeImage {
+            runtimeConfig.image = runtimeImage
+        }
         let pid: pid_t
         do {
             pid = try AttachedProcess.spawn(
                 Self.containerCLI,
-                Self.buildRunArguments(name: name, config: containerConfig, attached: true),
+                Self.buildRunArguments(name: name, config: runtimeConfig, attached: true),
                 ownProcessGroup: !interactive,
                 inheritStdin: interactive
             )

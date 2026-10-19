@@ -441,15 +441,20 @@ struct Run: AsyncParsableCommand {
             _ = try await images.pull(image, platform: platform)
         }
 
+        // The container keeps the image as given, as Docker's does, but the runtime can't
+        // start an image ID, only a name it is stored under.
+        let runtimeImage = try await images.runtimeReference(for: image)
+
         if detach {
-            let container = try await engine.run(containerConfig)
+            let container = try await engine.run(containerConfig, runtimeImage: runtimeImage)
             print(container.id)
             return
         }
 
         // In the foreground mocker stays attached until the container exits, and exits
         // with its code, as `docker run` does.
-        let exitCode = try await engine.runAttached(containerConfig, forwardSignals: sigProxy)
+        let exitCode = try await engine.runAttached(
+            containerConfig, runtimeImage: runtimeImage, forwardSignals: sigProxy)
         if exitCode != 0 {
             throw ExitCode(exitCode)
         }

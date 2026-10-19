@@ -90,6 +90,9 @@ struct ImageListOptions: ParsableArguments {
                 } else {
                     images = images.filter { $0.labels[value] != nil }
                 }
+            case "dangling":
+                let wanted = value == "true" || value == "1"
+                images = images.filter { $0.isDangling == wanted }
             default:
                 break
             }

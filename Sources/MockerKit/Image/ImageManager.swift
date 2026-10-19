@@ -5,9 +5,11 @@ import ContainerizationOCI
 /// Manages container images using Apple's Containerization framework.
 public actor ImageManager {
     private let imageStore: Containerization.ImageStore
+    private let storePath: URL
 
     public init(config: MockerConfig = MockerConfig()) throws {
         self.imageStore = try Containerization.ImageStore(path: config.ociStorePath)
+        self.storePath = config.ociStorePath
     }
 
     // MARK: - Pull
@@ -40,7 +42,7 @@ public actor ImageManager {
     public func list(enrich: Bool = true) async throws -> [ImageInfo] {
         // Primary: Apple CLI store (includes pulled and built images)
         let cliImages = try await listFromCLI(enrich: enrich)
-        if !cliImages.isEmpty { return cliImages }
+        if !cliImages.isEmpty { return Self.hidingNamedDangling(cliImages) }
 
         // Fallback: our OCI store
         let images = try await imageStore.list()
@@ -48,7 +50,7 @@ public actor ImageManager {
         for image in images {
             infos.append(enrich ? await Self.toImageInfo(image) : Self.basicImageInfo(image))
         }
-        return infos
+        return Self.hidingNamedDangling(infos)
     }
 
     private func listFromCLI(enrich: Bool) async throws -> [ImageInfo] {
@@ -108,6 +110,11 @@ public actor ImageManager {
             let name = cols[0]
             let tag = cols[1]
             let digest = "sha256:" + cols[2]
+            if Self.isDanglingReference("\(name):\(tag)") {
+                // The CLI prints a digest-only name without its digest, so find it by ID.
+                results.append((ImageInfo(id: digest, repository: "<none>", tag: "<none>"), cols[2]))
+                continue
+            }
             let repo = name.contains(".") || name.contains("/") ? name : "docker.io/library/\(name)"
             results.append((ImageInfo(id: digest, repository: repo, tag: tag), "\(name):\(tag)"))
         }
@@ -132,6 +139,122 @@ public actor ImageManager {
         let image = try await resolve(source)
         let dst = try Self.normalize(target)
         _ = try await imageStore.tag(existing: image.reference, new: dst)
+
+        // A named image is no longer dangling, as in Docker.
+        try await dropDanglingReference(digest: image.digest)
+    }
+
+    /// Drop the dangling placeholder of `digest`, once something names the image.
+    /// Checked first so that the store's state file is only rewritten when it changes.
+    private func dropDanglingReference(digest: String) async throws {
+        let reference = Self.danglingReference(digest: digest)
+        guard (try? await imageStore.get(reference: reference)) != nil else { return }
+        try await imageStore.delete(reference: reference)
+    }
+
+    // MARK: - Dangling images
+
+    /// Repository an untagged build is stored under. Apple's store keeps every image
+    /// under a name, so `mocker build` without `-t` stores the image as
+    /// `mocker-dangling@<digest>` and mocker shows it as `<none>:<none>`, the way Docker's
+    /// containerd image store uses `moby-dangling@<digest>`.
+    static let danglingName = "mocker-dangling"
+
+    /// The placeholder name of the dangling image with `digest`. Named by digest so that
+    /// rebuilding the same image untagged leaves one `<none>` entry, as in Docker.
+    static func danglingReference(digest: String) -> String {
+        "docker.io/library/\(danglingName)@\(digest)"
+    }
+
+    /// The throwaway name an untagged build runs under until it is renamed to its digest.
+    static func temporaryBuildReference() -> String {
+        "\(danglingName):build-\(UUID().uuidString.lowercased())"
+    }
+
+    /// Whether `reference` is a dangling placeholder, or a throwaway build name left
+    /// behind by an interrupted untagged build, which is just as nameless.
+    static func isDanglingReference(_ reference: String) -> Bool {
+        let library = "docker.io/library/"
+        let name = reference.hasPrefix(library) ? String(reference.dropFirst(library.count)) : reference
+        return name.hasPrefix("\(danglingName)@") || name.hasPrefix("\(danglingName):")
+    }
+
+    /// Listing without the dangling entries of images that also have a name, and with
+    /// one entry per dangling image. Docker shows an image as `<none>` only when nothing
+    /// else names it.
+    static func hidingNamedDangling(_ images: [ImageInfo]) -> [ImageInfo] {
+        let named = Set(images.filter { !$0.isDangling }.map(\.id))
+        var seen: Set<String> = []
+        return images.filter { image in
+            guard image.isDangling else { return true }
+            return !named.contains(image.id) && seen.insert(image.id).inserted
+        }
+    }
+
+    /// Whether a container started from one of `containerImages` uses the image stored
+    /// as `reference` with `digest`. A container records the image the way it was given,
+    /// which for a dangling image is its ID or a prefix of it.
+    static func isUsed(reference: String, digest: String, byContainerImages containerImages: [String]) -> Bool {
+        let hex = digestBody(digest).lowercased()
+        return containerImages.contains { image in
+            image == reference || (looksLikeDigest(image) && hex.hasPrefix(digestBody(image).lowercased()))
+        }
+    }
+
+    /// Remove the dangling images no container uses, as `docker image prune` does.
+    /// - Parameter containerImages: the image of every existing container.
+    /// - Returns: the IDs of the removed images and the bytes freed on disk.
+    public func pruneDangling(containerImages: [String]) async throws -> (deleted: [String], reclaimed: UInt64) {
+        let stored = try await imageStore.list()
+        let named = Set(stored.filter { !Self.isDanglingReference($0.reference) }.map(\.digest))
+        let unused = stored.filter {
+            Self.isDanglingReference($0.reference)
+                && !Self.isUsed(reference: $0.reference, digest: $0.digest, byContainerImages: containerImages)
+        }
+        guard !unused.isEmpty else { return ([], 0) }
+
+        // Delete through the runtime: it also removes the blobs nothing references any
+        // more, under the same lock its pulls and builds hold, which this process can't take.
+        let before = blobsSize()
+        let (output, exitCode) = try await runContainerCLI(["image", "delete"] + unused.map(\.reference))
+        guard exitCode == 0 else {
+            throw MockerError.operationFailed(output.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        let after = blobsSize()
+
+        var deleted: [String] = []
+        for image in unused where !named.contains(image.digest) && !deleted.contains(image.digest) {
+            deleted.append(image.digest)
+        }
+        return (deleted, before > after ? before - after : 0)
+    }
+
+    /// Total size of the blobs in the content store.
+    private func blobsSize() -> UInt64 {
+        let blobs = storePath.appendingPathComponent("content/blobs/sha256")
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: blobs, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
+        )) ?? []
+        return files.reduce(0) { total, file in
+            total + UInt64((try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        }
+    }
+
+    private func runContainerCLI(_ arguments: [String]) async throws -> (String, Int32) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.containerCLI)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        try process.run()
+        return await withCheckedContinuation { continuation in
+            process.terminationHandler = { p in
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                continuation.resume(returning: (String(data: data, encoding: .utf8) ?? "", p.terminationStatus))
+            }
+        }
     }
 
     // MARK: - Inspect
@@ -198,7 +321,8 @@ public actor ImageManager {
             .filter { $0.digest == image.digest }
             .map(\.reference)
             .sorted()
-        let references = matchingReferences.isEmpty ? [image.reference, fallbackReference] : matchingReferences
+        let references = (matchingReferences.isEmpty ? [image.reference, fallbackReference] : matchingReferences)
+            .filter { !isDanglingReference($0) }
 
         let tags = Set(references.compactMap(Self.repoTag(from:))).sorted()
         // Containerization exposes local references and the image's root descriptor digest,
@@ -254,18 +378,19 @@ public actor ImageManager {
     /// manual escape hatch for exotic architectures (ppc64le/s390x/riscv64) that
     /// the local arm64 BuildKit VM cannot emulate — see README and apple/container#1496.
     static func makeBuildArguments(
-        tag: String, dockerfilePath: String, context: String, noCache: Bool = false,
+        tags: [String], dockerfilePath: String, context: String, noCache: Bool = false,
         buildArgs: [String] = [], platforms: [String] = [], target: String? = nil,
-        labels: [String] = [], quiet: Bool = false, progress: String? = nil,
+        labels: [String] = [], progress: String? = nil,
         output: [String] = [], builder: String? = nil, ssh: [String] = []
     ) -> [String] {
-        var args = ["build", "-t", tag, "-f", dockerfilePath]
+        var args = ["build"]
+        for t in tags { args += ["-t", t] }
+        args += ["-f", dockerfilePath]
         if noCache { args.append("--no-cache") }
         for arg in buildArgs { args += ["--build-arg", arg] }
         for p in platforms { args += ["--platform", p] }
         if let target { args += ["--target", target] }
         for l in labels { args += ["-l", l] }
-        if quiet { args.append("-q") }
         if let progress { args += ["--progress", progress] }
         for o in output { args += ["-o", o] }
         if let builder, !builder.isEmpty { args += ["--builder", builder] }
@@ -298,10 +423,12 @@ public actor ImageManager {
     }
 
     /// Build an image from a Dockerfile using the `container` CLI.
+    /// - Parameter tags: names for the image. Without any the image is stored dangling,
+    ///   reachable by its ID only, as `docker build` without `-t` does.
     /// - Parameter platforms: pass multiple values to build a multi-arch manifest list (e.g. `["linux/amd64", "linux/arm64"]`).
     /// - Parameter builder: optional named builder instance forwarded to `container build --builder`,
     ///   enabling a remote BuildKit node for exotic architectures (apple/container#1496).
-    public func build(tag: String, context: String, dockerfile: String? = nil, noCache: Bool = false, buildArgs: [String] = [], platforms: [String] = [], target: String? = nil, labels: [String] = [], quiet: Bool = false, progress: String? = nil, output: [String] = [], builder: String? = nil, ssh: [String] = []) async throws -> ImageInfo {
+    public func build(tags: [String], context: String, dockerfile: String? = nil, noCache: Bool = false, buildArgs: [String] = [], platforms: [String] = [], target: String? = nil, labels: [String] = [], quiet: Bool = false, progress: String? = nil, output: [String] = [], builder: String? = nil, ssh: [String] = []) async throws -> ImageInfo {
         let absContext = Self.resolveContextPath(context: context, cwd: FileManager.default.currentDirectoryPath)
         let dockerfilePath = Self.resolveDockerfilePath(
             context: absContext,
@@ -313,18 +440,39 @@ public actor ImageManager {
             throw MockerError.buildError("Dockerfile not found at \(dockerfilePath)")
         }
 
+        // `container build` needs a name to store the image under, so an untagged build
+        // runs under a throwaway one that `keepDangling` replaces afterwards.
+        let buildTags = tags.isEmpty ? [Self.temporaryBuildReference()] : tags
         let args = Self.makeBuildArguments(
-            tag: tag, dockerfilePath: dockerfilePath, context: context, noCache: noCache,
+            tags: buildTags, dockerfilePath: dockerfilePath, context: context, noCache: noCache,
             buildArgs: buildArgs, platforms: platforms, target: target, labels: labels,
-            quiet: quiet, progress: progress, output: output, builder: builder, ssh: ssh
+            progress: progress, output: output, builder: builder, ssh: ssh
         )
+
+        // `container build -q` never returns (apple/container#2387), so a quiet build runs
+        // with its output kept in a file instead, shown only when the build fails.
+        let log = quiet
+            ? FileManager.default.temporaryDirectory.appendingPathComponent("mocker-build-\(UUID().uuidString).log")
+            : nil
+        defer {
+            if let log { try? FileManager.default.removeItem(at: log) }
+        }
+        let sink: FileHandle
+        if let log {
+            FileManager.default.createFile(atPath: log.path, contents: nil)
+            sink = try FileHandle(forWritingTo: log)
+        } else {
+            // Inherit the terminal so build progress is shown live. The runtime prints the
+            // image names to stdout; send them to stderr so stdout carries only what
+            // mocker prints.
+            sink = FileHandle.standardError
+        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.containerCLI)
         process.arguments = args
-        // Inherit terminal I/O so build progress is shown live
-        process.standardOutput = FileHandle.standardOutput
-        process.standardError = FileHandle.standardError
+        process.standardOutput = sink
+        process.standardError = sink
 
         try process.run()
 
@@ -333,21 +481,49 @@ public actor ImageManager {
                 continuation.resume(returning: p.terminationStatus)
             }
         }
+        if log != nil {
+            try? sink.close()
+        }
 
         guard exitCode == 0 else {
+            if let log, let data = try? Data(contentsOf: log) {
+                FileHandle.standardError.write(data)
+            }
             throw MockerError.buildError("Build failed with exit code \(exitCode)")
         }
 
         // Fetch real image info from the store after build. `container build -t <tag>`
         // stores the literal tag, so this must resolve verbatim-first too.
-        if let image = try? await resolve(tag) {
-            return await Self.toImageInfo(image)
+        guard let image = try? await resolve(buildTags[0]) else {
+            // The build succeeded but the image is not indexed in the store we can read.
+            // Report what is known instead of inventing a digest, size and timestamp.
+            let ref = try ImageReference.parse(buildTags[0])
+            return ImageInfo(id: "", repository: ref.fullRepository, tag: ref.tag)
         }
 
-        // The build succeeded but the image is not indexed in the store we can read.
-        // Report what is known instead of inventing a digest, size and timestamp.
-        let ref = try ImageReference.parse(tag)
-        return ImageInfo(id: "", repository: ref.fullRepository, tag: ref.tag)
+        if tags.isEmpty {
+            return try await keepDangling(image)
+        }
+
+        // A named image is no longer dangling, as in Docker.
+        try await dropDanglingReference(digest: image.digest)
+        return await Self.toImageInfo(image)
+    }
+
+    /// Move an untagged build from its throwaway name to its dangling placeholder. When
+    /// another name already points at the same image (an untagged rebuild of a tagged
+    /// image, fully cached), the image is not dangling, so only the throwaway name goes.
+    private func keepDangling(_ image: Containerization.Image) async throws -> ImageInfo {
+        let info = await Self.toImageInfo(image)
+
+        let stored = try await imageStore.list()
+        let named = stored.contains { $0.digest == image.digest && !Self.isDanglingReference($0.reference) }
+        if !named {
+            _ = try await imageStore.tag(existing: image.reference, new: Self.danglingReference(digest: image.digest))
+        }
+        try await imageStore.delete(reference: image.reference)
+
+        return info
     }
 
     // MARK: - Push
@@ -404,27 +580,46 @@ public actor ImageManager {
     /// first therefore matched a *different* image than the one named — `rmi caddy:latest`
     /// deleted the pulled base image instead of the local build.
     private func resolve(_ reference: String) async throws -> Containerization.Image {
+        if let hit = await findByName(reference) {
+            return hit
+        }
+        if let hit = try await findByDigest(reference) {
+            return hit
+        }
+        throw MockerError.imageNotFound(reference)
+    }
+
+    private func findByName(_ reference: String) async -> Containerization.Image? {
         for candidate in Self.resolutionCandidates(reference) {
             if let hit = try? await imageStore.get(reference: candidate) {
                 return hit
             }
         }
-        // Nothing answered to the reference as a name. `mocker images -q` prints digests
-        // (truncated by default), and `mocker images -q | xargs mocker rmi` is the usual
-        // cleanup, so fall back to matching the stored digests by prefix.
-        if Self.looksLikeDigest(reference) {
-            let stored = (try? await imageStore.list()) ?? []
-            let distinct = Self.matchingDigests(reference, in: stored.map(\.digest))
-            if distinct.count > 1 {
-                throw MockerError.operationFailed(
-                    "image reference \(reference) is ambiguous: it matches \(distinct.count) images")
-            }
-            if let digest = distinct.first,
-               let hit = stored.first(where: { $0.digest == digest }) {
-                return hit
-            }
+        return nil
+    }
+
+    /// `mocker images -q` prints digests (truncated by default), and
+    /// `mocker images -q | xargs mocker rmi` is the usual cleanup, so an image is also
+    /// found by a prefix of its stored digest.
+    private func findByDigest(_ reference: String) async throws -> Containerization.Image? {
+        guard Self.looksLikeDigest(reference) else { return nil }
+
+        let stored = (try? await imageStore.list()) ?? []
+        let distinct = Self.matchingDigests(reference, in: stored.map(\.digest))
+        if distinct.count > 1 {
+            throw MockerError.operationFailed(
+                "image reference \(reference) is ambiguous: it matches \(distinct.count) images")
         }
-        throw MockerError.imageNotFound(reference)
+        guard let digest = distinct.first else { return nil }
+        return stored.first(where: { $0.digest == digest })
+    }
+
+    /// The stored name to start `reference` under. `container run` knows images by name
+    /// only, so an image ID (`mocker run 3f1c9a2b`, `mocker run $(mocker build -q .)`)
+    /// is swapped for a name the image is stored under. Nil when `reference` is a name.
+    public func runtimeReference(for reference: String) async throws -> String? {
+        guard await findByName(reference) == nil else { return nil }
+        return try await findByDigest(reference)?.reference
     }
 
     /// Whether an argument should be tried as a digest: a full `sha256:...`, the truncated
@@ -530,27 +725,29 @@ public actor ImageManager {
 
     /// Repository/tag/digest only — no manifest or config reads.
     private static func basicImageInfo(_ image: Containerization.Image) -> ImageInfo {
-        let ref = try? ImageReference.parse(image.reference)
-        return ImageInfo(
-            id: image.digest,
-            repository: ref?.fullRepository ?? image.reference,
-            tag: ref?.tag ?? "latest"
-        )
+        let name = displayName(of: image.reference)
+        return ImageInfo(id: image.digest, repository: name.repository, tag: name.tag)
     }
 
     private static func toImageInfo(_ image: Containerization.Image) async -> ImageInfo {
-        // Parse repo and tag from the reference string
-        let ref = try? ImageReference.parse(image.reference)
-        let repository = ref?.fullRepository ?? image.reference
-        let tag = ref?.tag ?? "latest"
+        let name = displayName(of: image.reference)
         let metadata = await sizeAndCreated(of: image)
 
         return ImageInfo(
             id: image.digest,
-            repository: repository,
-            tag: tag,
+            repository: name.repository,
+            tag: name.tag,
             size: metadata.size,
             created: metadata.created
         )
+    }
+
+    /// Repository and tag to show for a stored reference; `<none>` for a dangling image.
+    static func displayName(of reference: String) -> (repository: String, tag: String) {
+        if isDanglingReference(reference) {
+            return ("<none>", "<none>")
+        }
+        let ref = try? ImageReference.parse(reference)
+        return (ref?.fullRepository ?? reference, ref?.tag ?? "latest")
     }
 }
