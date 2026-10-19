@@ -1,4 +1,5 @@
 import ArgumentParser
+import Foundation
 import MockerKit
 
 struct Build: AsyncParsableCommand {
@@ -9,8 +10,8 @@ struct Build: AsyncParsableCommand {
     @Argument(help: "Build context path")
     var context: String = "."
 
-    @Option(name: .shortAndLong, help: "Name and optionally a tag (name:tag)")
-    var tag: String
+    @Option(name: .shortAndLong, parsing: .singleValue, help: "Name and optionally a tag (name:tag)")
+    var tag: [String] = []
 
     @Option(name: .shortAndLong, help: "Name of the Dockerfile")
     var file: String?
@@ -125,22 +126,29 @@ struct Build: AsyncParsableCommand {
         let manager = try ImageManager(config: config)
 
         if !quiet {
-            print("Building \(tag)...")
+            print(tag.isEmpty ? "Building..." : "Building \(tag.joined(separator: ", "))...")
         }
         let image = try await manager.build(
-            tag: tag, context: context, dockerfile: file, noCache: noCache,
+            tags: tag, context: context, dockerfile: file, noCache: noCache,
             buildArgs: buildArg, platforms: platform, target: target,
             labels: label, quiet: quiet, progress: progress, output: output,
             builder: builder, ssh: ssh
         )
+
+        if let iidfile, !image.id.isEmpty {
+            try image.id.write(toFile: iidfile, atomically: true, encoding: .utf8)
+        }
+
         // The build can succeed while the image is not readable from our store; report
-        // the tag rather than an empty ID in that case.
-        let identifier = image.id.isEmpty ? tag : image.shortID
+        // the name rather than an empty ID in that case.
         if quiet {
-            print(identifier)
-        } else {
-            print("Successfully built \(identifier)")
-            print("Successfully tagged \(tag)")
+            // Docker prints the full ID, so `$(mocker build -q .)` names the image exactly.
+            print(image.id.isEmpty ? image.reference : image.id)
+            return
+        }
+        print("Successfully built \(image.id.isEmpty ? image.reference : image.shortID)")
+        for t in tag {
+            print("Successfully tagged \(t)")
         }
     }
 }

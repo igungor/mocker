@@ -38,6 +38,11 @@ public struct ImageInfo: Codable, Sendable, Identifiable {
         "\(repository):\(tag)"
     }
 
+    /// Whether nothing names the image, which Docker shows as `<none>:<none>`.
+    public var isDangling: Bool {
+        repository == "<none>" && tag == "<none>"
+    }
+
     /// Human-readable size string, or `N/A` when the size is unknown.
     public var sizeString: String {
         guard let size else { return "N/A" }

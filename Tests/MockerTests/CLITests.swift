@@ -187,13 +187,34 @@ struct CLITests {
             ".",
         ])
         #expect(command.platform == ["linux/amd64", "linux/arm64"])
-        #expect(command.tag == "multi:latest")
+        #expect(command.tag == ["multi:latest"])
     }
 
     @Test("Build command leaves platform empty when omitted")
     func buildPlatformDefaultsEmpty() throws {
         let command = try Build.parse(["-t", "x:latest", "."])
         #expect(command.platform.isEmpty)
+    }
+
+    @Test("Build command needs no tag, as docker build doesn't")
+    func buildWithoutTag() throws {
+        let command = try Build.parse(["."])
+        #expect(command.tag.isEmpty)
+        #expect(command.context == ".")
+    }
+
+    @Test("Build command accepts repeated -t flags")
+    func buildRepeatedTag() throws {
+        let command = try Build.parse(["-t", "app:1", "--tag", "app:latest", "."])
+        #expect(command.tag == ["app:1", "app:latest"])
+    }
+
+    @Test("image prune prints reclaimed space the way Docker does")
+    func imagePruneHumanSize() {
+        #expect(ImagePrune.humanSize(0) == "0B")
+        #expect(ImagePrune.humanSize(999) == "999B")
+        #expect(ImagePrune.humanSize(1_234_567) == "1.235MB")
+        #expect(ImagePrune.humanSize(2_000_000_000) == "2GB")
     }
 
     @Test("Manifest inspect command parses reference argument")
@@ -280,6 +301,19 @@ struct CLITests {
 
         let byLabel = try ImageLs.parse(["--filter", "label=env=dev"]).options
         #expect(byLabel.filtered(images).map(\.id) == ["b"])
+    }
+
+    @Test("image ls --filter dangling selects <none> images, or the named ones")
+    func imageLsDanglingFilter() throws {
+        let images = [
+            ImageInfo(id: "a", repository: "nginx", tag: "latest"),
+            ImageInfo(id: "b", repository: "<none>", tag: "<none>"),
+        ]
+        let dangling = try ImageLs.parse(["--filter", "dangling=true"]).options
+        #expect(dangling.filtered(images).map(\.id) == ["b"])
+
+        let named = try ImageLs.parse(["--filter", "dangling=false"]).options
+        #expect(named.filtered(images).map(\.id) == ["a"])
     }
 
     @Test("image ls --format substitutes repository, tag and labels")

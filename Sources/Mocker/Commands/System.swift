@@ -123,7 +123,12 @@ struct SystemPrune: AsyncParsableCommand {
         }
 
         print("Deleted \(removedContainers) containers")
-        print("Total reclaimed space: 0B")
+
+        // Only the running containers are left to hold on to an image.
+        let inUse = containers.filter { $0.state.isActive }.map(\.image)
+        let images = try await ImageManager(config: config).pruneDangling(containerImages: inUse)
+        ImagePrune.printDeleted(images.deleted)
+        print("Total reclaimed space: \(ImagePrune.humanSize(images.reclaimed))")
     }
 }
 

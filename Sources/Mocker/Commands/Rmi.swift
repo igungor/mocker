@@ -25,7 +25,9 @@ struct Rmi: AsyncParsableCommand {
 
         for reference in images {
             let image = try await manager.remove(reference)
-            print("Untagged: \(image.reference)")
+            if !image.isDangling {
+                print("Untagged: \(image.reference)")
+            }
             print("Deleted: \(image.id)")
         }
     }

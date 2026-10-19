@@ -10,7 +10,7 @@ struct ImageManagerBuildArgsTests {
     @Test("base arguments are well-formed")
     func baseArgs() {
         let args = ImageManager.makeBuildArguments(
-            tag: "myapp:latest", dockerfilePath: "/ctx/Dockerfile", context: "."
+            tags: ["myapp:latest"], dockerfilePath: "/ctx/Dockerfile", context: "."
         )
         #expect(args.first == "build")
         #expect(args.contains("-t"))
@@ -24,7 +24,7 @@ struct ImageManagerBuildArgsTests {
     @Test("--builder is omitted when not provided")
     func builderOmittedByDefault() {
         let args = ImageManager.makeBuildArguments(
-            tag: "myapp:latest", dockerfilePath: "/ctx/Dockerfile", context: "."
+            tags: ["myapp:latest"], dockerfilePath: "/ctx/Dockerfile", context: "."
         )
         #expect(!args.contains("--builder"))
     }
@@ -32,7 +32,7 @@ struct ImageManagerBuildArgsTests {
     @Test("--builder is omitted when empty")
     func builderOmittedWhenEmpty() {
         let args = ImageManager.makeBuildArguments(
-            tag: "myapp:latest", dockerfilePath: "/ctx/Dockerfile", context: ".", builder: ""
+            tags: ["myapp:latest"], dockerfilePath: "/ctx/Dockerfile", context: ".", builder: ""
         )
         #expect(!args.contains("--builder"))
     }
@@ -40,7 +40,7 @@ struct ImageManagerBuildArgsTests {
     @Test("--builder is forwarded with its value")
     func builderForwarded() {
         let args = ImageManager.makeBuildArguments(
-            tag: "myapp:latest", dockerfilePath: "/ctx/Dockerfile", context: ".",
+            tags: ["myapp:latest"], dockerfilePath: "/ctx/Dockerfile", context: ".",
             builder: "remote-ppc64le"
         )
         // The flag and its value must appear adjacently.
@@ -57,7 +57,7 @@ struct ImageManagerBuildArgsTests {
     @Test("--builder composes with --platform for exotic-arch builds")
     func builderWithExoticPlatform() {
         let args = ImageManager.makeBuildArguments(
-            tag: "myapp:latest", dockerfilePath: "/ctx/Dockerfile", context: ".",
+            tags: ["myapp:latest"], dockerfilePath: "/ctx/Dockerfile", context: ".",
             platforms: ["linux/ppc64le"], builder: "remote"
         )
         #expect(args.contains("--platform"))
@@ -69,16 +69,15 @@ struct ImageManagerBuildArgsTests {
     @Test("all optional flags are emitted in the expected shape")
     func fullArgs() {
         let args = ImageManager.makeBuildArguments(
-            tag: "myapp:1.0", dockerfilePath: "/ctx/Dockerfile", context: "ctx",
+            tags: ["myapp:1.0"], dockerfilePath: "/ctx/Dockerfile", context: "ctx",
             noCache: true, buildArgs: ["KEY=val"], platforms: ["linux/arm64", "linux/amd64"],
-            target: "builder-stage", labels: ["a=b"], quiet: true, progress: "plain",
+            target: "builder-stage", labels: ["a=b"], progress: "plain",
             output: ["type=docker"], builder: "myremote"
         )
         #expect(args.contains("--no-cache"))
         #expect(adjacent(args, "--build-arg", "KEY=val"))
         #expect(adjacent(args, "--target", "builder-stage"))
         #expect(adjacent(args, "-l", "a=b"))
-        #expect(args.contains("-q"))
         #expect(adjacent(args, "--progress", "plain"))
         #expect(adjacent(args, "-o", "type=docker"))
         #expect(adjacent(args, "--builder", "myremote"))
@@ -91,7 +90,7 @@ struct ImageManagerBuildArgsTests {
     @Test("--ssh is omitted when not provided")
     func sshOmittedByDefault() {
         let args = ImageManager.makeBuildArguments(
-            tag: "myapp:latest", dockerfilePath: "/ctx/Dockerfile", context: "."
+            tags: ["myapp:latest"], dockerfilePath: "/ctx/Dockerfile", context: "."
         )
         #expect(!args.contains("--ssh"))
     }
@@ -99,7 +98,7 @@ struct ImageManagerBuildArgsTests {
     @Test("--ssh is forwarded before the context")
     func sshForwarded() {
         let args = ImageManager.makeBuildArguments(
-            tag: "myapp:latest", dockerfilePath: "/ctx/Dockerfile", context: ".",
+            tags: ["myapp:latest"], dockerfilePath: "/ctx/Dockerfile", context: ".",
             ssh: ["default"]
         )
         #expect(adjacent(args, "--ssh", "default"))
