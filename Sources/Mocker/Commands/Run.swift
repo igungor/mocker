@@ -441,20 +441,17 @@ struct Run: AsyncParsableCommand {
             _ = try await images.pull(image, platform: platform)
         }
 
-        let container = try await engine.run(containerConfig)
-
         if detach {
-            // Detached mode: print full container ID
+            let container = try await engine.run(containerConfig)
             print(container.id)
-        } else {
-            // Foreground mode: show container output
-            let lines = try await engine.logs(container.id)
-            for line in lines {
-                print(line)
-            }
-            if rm {
-                _ = try? await engine.remove(container.id, force: true)
-            }
+            return
+        }
+
+        // In the foreground mocker stays attached until the container exits, and exits
+        // with its code, as `docker run` does.
+        let exitCode = try await engine.runAttached(containerConfig, forwardSignals: sigProxy)
+        if exitCode != 0 {
+            throw ExitCode(exitCode)
         }
     }
 }
