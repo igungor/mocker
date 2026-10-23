@@ -283,6 +283,7 @@ public actor ComposeOrchestrator {
 
         events += try await Self.tearDown(
             containers,
+            dependents: Self.dependents(of: containers, composeFile: composeFile),
             stop: { [engine] in _ = try await engine.stop($0.id, timeout: timeout) },
             remove: { [engine] in _ = try await engine.remove($0.id, force: $1) }
         )
@@ -360,23 +361,73 @@ public actor ComposeOrchestrator {
         }
     }
 
-    /// Stops and removes the containers `down` listed. Each is removed by force, as Docker
-    /// Compose does: one an interrupted `up` was still starting can be running by now,
-    /// though it was listed as stopped.
+    /// Stops and removes the containers `down` listed, all at the same time, as Docker
+    /// Compose does. A container is stopped once the containers in `dependents`, those of
+    /// the services that depend on its own, have stopped, so a database stops after the
+    /// apps using it. Each is removed by force, as Docker Compose does: one an interrupted
+    /// `up` was still starting can be running by now, though it was listed as stopped.
     nonisolated static func tearDown(
         _ containers: [ContainerInfo],
-        stop: @Sendable (ContainerInfo) async throws -> Void,
-        remove: @Sendable (ContainerInfo, _ force: Bool) async throws -> Void
+        dependents: [String: [String]] = [:],
+        stop: @escaping @Sendable (ContainerInfo) async throws -> Void,
+        remove: @escaping @Sendable (ContainerInfo, _ force: Bool) async throws -> Void
     ) async throws -> [ComposeEvent] {
-        var events: [ComposeEvent] = []
-        for container in containers {
-            if container.state.isActive, try await stopListed({ try await stop(container) }) {
-                events.append(.containerStopped(container.name))
+        let byName = Dictionary(containers.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        var stops: [String: Task<Bool, Error>] = [:]
+        var teardowns: [String: Task<[ComposeEvent], Error>] = [:]
+        var scheduling: Set<String> = []
+
+        func schedule(_ container: ContainerInfo) {
+            guard stops[container.name] == nil, !scheduling.contains(container.name) else { return }
+            scheduling.insert(container.name)
+
+            let first = (dependents[container.name] ?? []).compactMap { byName[$0] }
+            first.forEach(schedule)
+            let waits = first.compactMap { stops[$0.name] }
+
+            let stopped = Task {
+                for wait in waits { _ = try? await wait.value }
+                guard container.state.isActive else { return false }
+                return try await stopListed({ try await stop(container) })
             }
-            try await remove(container, true)
-            events.append(.containerRemoved(container.name))
+            stops[container.name] = stopped
+            teardowns[container.name] = Task {
+                var events: [ComposeEvent] = []
+                if try await stopped.value {
+                    events.append(.containerStopped(container.name))
+                }
+                try await remove(container, true)
+                events.append(.containerRemoved(container.name))
+                return events
+            }
         }
+        containers.forEach(schedule)
+
+        var events: [ComposeEvent] = []
+        var firstError: Error?
+        for container in containers {
+            guard let teardown = teardowns[container.name] else { continue }
+            do {
+                events += try await teardown.value
+            } catch {
+                firstError = firstError ?? error
+            }
+        }
+        if let firstError { throw firstError }
         return events
+    }
+
+    nonisolated static func dependents(of containers: [ContainerInfo], composeFile: ComposeFile) -> [String: [String]] {
+        let service = { (container: ContainerInfo) in container.labels["com.mocker.compose.service"] ?? "" }
+
+        var dependents: [String: [String]] = [:]
+        for container in containers {
+            let name = service(container)
+            dependents[container.name] = containers
+                .filter { composeFile.services[service($0)]?.dependsOn.contains(name) == true }
+                .map(\.name)
+        }
+        return dependents
     }
 
     /// Whether a container belongs to `service` in this project. The label written at
