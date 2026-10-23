@@ -24,7 +24,7 @@ actor ImageStore {
         let data = try encoder.encode(image)
         let safeID = image.id.replacingOccurrences(of: ":", with: "_")
         let filePath = "\(path)/\(safeID).json"
-        try data.write(to: URL(fileURLWithPath: filePath))
+        try data.write(to: URL(fileURLWithPath: filePath), options: .atomic)
     }
 
     func delete(_ id: String) throws {
@@ -40,10 +40,10 @@ actor ImageStore {
         let files = try fm.contentsOfDirectory(atPath: path)
             .filter { $0.hasSuffix(".json") }
 
-        return try files.compactMap { file in
+        return files.compactMap { file in
             let filePath = "\(path)/\(file)"
-            let data = try Data(contentsOf: URL(fileURLWithPath: filePath))
-            return try decoder.decode(ImageInfo.self, from: data)
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)) else { return nil }
+            return try? decoder.decode(ImageInfo.self, from: data)
         }
         // Newest first; entries with an unknown timestamp sort last.
         .sorted { ($0.created ?? .distantPast) > ($1.created ?? .distantPast) }
