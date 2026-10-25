@@ -23,13 +23,12 @@ actor ContainerStore {
     func save(_ container: ContainerInfo) throws {
         let data = try encoder.encode(container)
         let filePath = "\(path)/\(container.id).json"
-        try data.write(to: URL(fileURLWithPath: filePath))
+        try data.write(to: URL(fileURLWithPath: filePath), options: .atomic)
     }
 
     func load(_ id: String) throws -> ContainerInfo? {
         let filePath = "\(path)/\(id).json"
-        guard fm.fileExists(atPath: filePath) else { return nil }
-        let data = try Data(contentsOf: URL(fileURLWithPath: filePath))
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)) else { return nil }
         return try decoder.decode(ContainerInfo.self, from: data)
     }
 
@@ -45,10 +44,10 @@ actor ContainerStore {
         let files = try fm.contentsOfDirectory(atPath: path)
             .filter { $0.hasSuffix(".json") }
 
-        return try files.compactMap { file in
+        return files.compactMap { file in
             let filePath = "\(path)/\(file)"
-            let data = try Data(contentsOf: URL(fileURLWithPath: filePath))
-            return try decoder.decode(ContainerInfo.self, from: data)
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)) else { return nil }
+            return try? decoder.decode(ContainerInfo.self, from: data)
         }
         .sorted { $0.created > $1.created }
     }
