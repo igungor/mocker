@@ -451,6 +451,9 @@ public actor ContainerEngine {
 
     // MARK: - Stop
 
+    /// The runtime's own default stop timeout, in seconds.
+    static let defaultStopTimeout = 5
+
     /// - Parameter timeout: seconds to wait for the container to exit before it is
     ///   killed. `compose stop`/`down` pass their `--timeout` here; it used to be parsed
     ///   and dropped, leaving every teardown on the runtime's own default.
@@ -460,12 +463,18 @@ public actor ContainerEngine {
             throw MockerError.containerNotRunning(identifier)
         }
 
-        var arguments = ["stop"]
-        if let timeout { arguments += ["-t", String(timeout)] }
-        arguments.append(container.name)
-        let (_, exitCode) = try await runCLI(arguments)
-        guard exitCode == 0 else {
-            throw MockerError.operationFailed("failed to stop container \(container.name)")
+        let name = container.name
+        let timeout = timeout ?? Self.defaultStopTimeout
+        let signal = timeout > 0 ? await inspectEntry(name).flatMap(Self.stopSignal(inspect:)) : nil
+
+        let stopped = try await Self.stopWithKill(
+            signal: signal ?? "SIGTERM",
+            timeout: .seconds(timeout),
+            kill: { signal in try await self.runCLI(["kill", "--signal", signal, name]).1 == 0 },
+            isRunning: { await self.isRunningInRuntime(name) }
+        )
+        guard stopped else {
+            throw MockerError.operationFailed("failed to stop container \(name)")
         }
 
         await portProxy.stop(containerID: container.id)
@@ -475,6 +484,42 @@ public actor ContainerEngine {
         updated.status = ContainerState.exited.displayString
         try await store.save(updated)
         return updated
+    }
+
+    /// Uses `container kill` because `container stop` can stall 3s past the container's exit:
+    /// the runtime waits on the process twice, and each wait needs both output streams
+    /// closed, so when each sees only one, both wait out the runtime's 3s limit.
+    static func stopWithKill(
+        signal: String,
+        timeout: Duration,
+        pollInterval: Duration = .milliseconds(50),
+        kill: @Sendable (String) async throws -> Bool,
+        isRunning: @Sendable () async -> Bool
+    ) async throws -> Bool {
+        if timeout > .zero, try await kill(signal) {
+            let deadline = ContinuousClock.now + timeout
+            while ContinuousClock.now < deadline {
+                guard await isRunning() else { return true }
+                try await Task.sleep(for: pollInterval)
+            }
+        }
+
+        // SIGKILL also fails on a container that has exited since.
+        if try await kill("SIGKILL") { return true }
+        return !(await isRunning())
+    }
+
+    private func isRunningInRuntime(_ name: String) async -> Bool {
+        guard let entry = await inspectEntry(name) else { return true }
+        return Self.isRunning(inspect: entry)
+    }
+
+    static func isRunning(inspect entry: [String: Any]) -> Bool {
+        (entry["status"] as? [String: Any])?["state"] as? String != "stopped"
+    }
+
+    static func stopSignal(inspect entry: [String: Any]) -> String? {
+        (entry["configuration"] as? [String: Any])?["stopSignal"] as? String
     }
 
     // MARK: - Remove
@@ -490,8 +535,9 @@ public actor ContainerEngine {
             )
         }
 
+        // SIGKILL, as Docker's `rm -f` sends, and without `container stop`'s stall.
         if isLiveRunning {
-            _ = try? await runCLI(["stop", container.name])
+            _ = try? await runCLI(["kill", container.name])
         }
 
         await portProxy.stop(containerID: container.id)
@@ -975,13 +1021,17 @@ public actor ContainerEngine {
 
     /// The container as the runtime reports it, or nil when the runtime doesn't have it.
     private func inspectRuntime(name: String, id: String? = nil, config: ContainerConfig) async -> ContainerInfo? {
+        guard let entry = await inspectEntry(name) else { return nil }
+        return ContainerEngine.decodeInspect(entry, id: id ?? name, name: name, config: config)
+    }
+
+    private func inspectEntry(_ name: String) async -> [String: Any]? {
         guard let (output, _) = try? await runCLI(["inspect", name]),
               let data = output.data(using: .utf8),
-              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-              let first = arr.first
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
         else { return nil }
 
-        return ContainerEngine.decodeInspect(first, id: id ?? name, name: name, config: config)
+        return arr.first
     }
 
     static func parseLSOutput(_ output: String) -> Set<String> {
