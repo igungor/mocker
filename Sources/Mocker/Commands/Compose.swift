@@ -287,7 +287,7 @@ struct ComposeUp: AsyncParsableCommand {
 
         // Guard before `ensureDirectories`: a dry run must not write anything at all.
         if options.dryRun {
-            ComposeDryRun.report("up", targets: composeFile.serviceOrder().map { "\(project)-\($0)-1" })
+            ComposeDryRun.report("up", targets: composeFile.serviceOrder().map { composeFile.containerName($0, projectName: project) })
             return
         }
 
@@ -350,7 +350,7 @@ struct ComposeDown: AsyncParsableCommand {
         let removeImages = try Self.parseRemoveImages(rmi)
 
         if options.dryRun {
-            var targets = composeFile.services.keys.sorted().map { "\(project)-\($0)-1" }
+            var targets = composeFile.services.keys.sorted().map { composeFile.containerName($0, projectName: project) }
             if volumes {
                 targets += ComposeOrchestrator.volumesToRemove(composeFile: composeFile, projectName: project)
             }
@@ -605,7 +605,7 @@ struct ComposeKill: AsyncParsableCommand {
 
         if options.dryRun {
             let names = service.map { [$0] } ?? composeFile.services.keys.sorted()
-            ComposeDryRun.report("kill", targets: names.map { "\(project)-\($0)-1" })
+            ComposeDryRun.report("kill", targets: names.map { composeFile.containerName($0, projectName: project) })
             return
         }
 
@@ -656,7 +656,7 @@ struct ComposeRestart: AsyncParsableCommand {
 
         if options.dryRun {
             let names = service.map { [$0] } ?? composeFile.serviceOrder()
-            ComposeDryRun.report("restart", targets: names.map { "\(project)-\($0)-1" })
+            ComposeDryRun.report("restart", targets: names.map { composeFile.containerName($0, projectName: project) })
             return
         }
 
@@ -953,7 +953,7 @@ struct ComposeExec: AsyncParsableCommand {
         let config = MockerConfig()
         try composeFile.validateServiceNames([service])
 
-        let containerName = "\(project)-\(service)-\(index)"
+        let containerName = composeFile.containerName(service, projectName: project, index: index)
         if options.dryRun {
             ComposeDryRun.report("exec", targets: [containerName])
             return
@@ -1172,7 +1172,7 @@ struct ComposeStop: AsyncParsableCommand {
     /// `--dry-run` branches of stop/start/rm, which select the same way.
     static func dryRunTargets(_ composeFile: ComposeFile, _ project: String, _ services: [String]) -> [String] {
         let names = services.isEmpty ? composeFile.services.keys.sorted() : services.sorted()
-        return names.map { "\(project)-\($0)-1" }
+        return names.map { composeFile.containerName($0, projectName: project) }
     }
 }
 
@@ -1531,7 +1531,7 @@ struct ComposeCreate: AsyncParsableCommand {
 
         // Guard before `ensureDirectories`: a dry run must not write anything at all.
         if options.dryRun {
-            ComposeDryRun.report("create", targets: composeFile.serviceOrder().map { "\(project)-\($0)-1" })
+            ComposeDryRun.report("create", targets: composeFile.serviceOrder().map { composeFile.containerName($0, projectName: project) })
             return
         }
 
@@ -1684,7 +1684,7 @@ struct ComposePort: AsyncParsableCommand {
         try composeFile.validateServiceNames([service])
         let engine = try ContainerEngine(config: config)
 
-        let containerName = "\(project)-\(service)-\(index)"
+        let containerName = composeFile.containerName(service, projectName: project, index: index)
         let info = try await engine.inspect(containerName)
         if let port = info.ports.first(where: { $0.containerPort == UInt16(privatePort) }) {
             print("\(port.hostIp ?? "0.0.0.0"):\(port.hostPort)")
@@ -1869,7 +1869,7 @@ struct ComposeCp: AsyncParsableCommand {
     var followLink = false
 
     func run() async throws {
-        let (_, project, _) = try options.loadCompose()
+        let (composeFile, project, _) = try options.loadCompose()
         let config = MockerConfig()
 
         if options.dryRun {
@@ -1883,13 +1883,13 @@ struct ComposeCp: AsyncParsableCommand {
         let parts = source.split(separator: ":", maxSplits: 1).map(String.init)
         if parts.count == 2 && !parts[0].hasPrefix("/") && !parts[0].hasPrefix(".") {
             // Copy from container
-            let containerName = "\(project)-\(parts[0])-\(index)"
+            let containerName = composeFile.containerName(parts[0], projectName: project, index: index)
             let data = try await engine.copyFromContainer(containerName, path: parts[1])
             try data.write(to: URL(fileURLWithPath: destination))
         } else {
             let dstParts = destination.split(separator: ":", maxSplits: 1).map(String.init)
             if dstParts.count == 2 && !dstParts[0].hasPrefix("/") {
-                let containerName = "\(project)-\(dstParts[0])-\(index)"
+                let containerName = composeFile.containerName(dstParts[0], projectName: project, index: index)
                 let data = try Data(contentsOf: URL(fileURLWithPath: source))
                 try await engine.copyToContainer(containerName, path: dstParts[1], data: data)
             }
@@ -1954,7 +1954,7 @@ struct ComposeAttach: AsyncParsableCommand {
         let config = MockerConfig()
         try composeFile.validateServiceNames([service])
         let idx = index ?? 1
-        let containerName = "\(project)-\(service)-\(idx)"
+        let containerName = composeFile.containerName(service, projectName: project, index: idx)
 
         if options.dryRun {
             ComposeDryRun.report("attach", targets: [containerName])

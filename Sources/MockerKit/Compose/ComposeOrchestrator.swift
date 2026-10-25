@@ -172,7 +172,7 @@ public actor ComposeOrchestrator {
             case .keep:
                 // Already running and config-hash matches: true no-op, no engine calls.
                 skipSet.insert(action.serviceName)
-                events.append(.containerRunning("\(projectName)-\(action.serviceName)-1"))
+                events.append(.containerRunning(composeFile.containerName(action.serviceName, projectName: projectName)))
             case .start:
                 // Config-hash matches but the container isn't running (stopped, exited,
                 // or crashed) — start the existing container instead of recreating it.
@@ -243,7 +243,7 @@ public actor ComposeOrchestrator {
                     try await self.refreshHostsFiles(composeFile)
                 }
             }
-            events.append(.containerStarted("\(projectName)-\(service.name)-1"))
+            events.append(.containerStarted(service.runtimeName(projectName: projectName)))
         }
 
         do {
@@ -652,7 +652,7 @@ public actor ComposeOrchestrator {
         completions: [String: Task<Int32, Error>],
         composeFile: ComposeFile
     ) async throws {
-        let containerName = "\(projectName)-\(serviceName)-1"
+        let containerName = composeFile.containerName(serviceName, projectName: projectName)
 
         if awaited.contains(serviceName) {
             if let exitCode = try await completions[serviceName]?.value, exitCode != 0 {
@@ -680,7 +680,7 @@ public actor ComposeOrchestrator {
     /// Block until `serviceName`'s health check passes, as `depends_on`
     /// `condition: service_healthy` asks. Errors match Docker Compose's.
     private func waitUntilHealthy(_ serviceName: String, composeFile: ComposeFile) async throws {
-        let containerName = "\(projectName)-\(serviceName)-1"
+        let containerName = composeFile.containerName(serviceName, projectName: projectName)
         guard let check = composeFile.services[serviceName]?.healthcheck, !check.isDisabled else {
             throw MockerError.operationFailed("dependency failed to start: container \(containerName) has no healthcheck configured")
         }
@@ -892,7 +892,7 @@ public actor ComposeOrchestrator {
         composeFile: ComposeFile = ComposeFile(),
         detach: Bool
     ) async throws -> ContainerConfig {
-        let containerName = "\(projectName)-\(service.name)-1"
+        let containerName = service.runtimeName(projectName: projectName)
 
         // Resolved once: it is both what the container joins and what is recorded on it,
         // so a later change to the network is visible to the reconcile.
