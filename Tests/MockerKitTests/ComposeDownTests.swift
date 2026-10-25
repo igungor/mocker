@@ -41,6 +41,24 @@ struct ComposeTearDownTests {
         func add(_ call: String) { log.append(call) }
     }
 
+    /// Stops that each wait, for up to 5s, until `count` stops have started. Run one
+    /// after another, none sees the others start.
+    private actor Stops {
+        var started = 0
+        var sawOthers = 0
+
+        func startAndWaitForOthers(_ count: Int) async throws {
+            started += 1
+
+            let deadline = ContinuousClock.now + .seconds(5)
+            while started < count, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+
+            if started == count { sawOthers += 1 }
+        }
+    }
+
     private func container(_ name: String, _ state: ContainerState) -> ContainerInfo {
         ContainerInfo(id: name, name: name, image: "alpine", state: state, status: "", created: Date())
     }
@@ -115,15 +133,15 @@ struct ComposeTearDownTests {
 
     @Test("tears independent containers down at the same time")
     func parallel() async throws {
-        let start = Date()
+        let stops = Stops()
 
         _ = try await ComposeOrchestrator.tearDown(
             [container("app-web-1", .running), container("app-worker-1", .running)],
-            stop: { _ in try await Task.sleep(for: .milliseconds(300)) },
+            stop: { _ in try await stops.startAndWaitForOthers(2) },
             remove: { _, _ in }
         )
 
-        #expect(Date().timeIntervalSince(start) < 0.55)
+        #expect(await stops.sawOthers == 2)
     }
 
     @Test("tears every container down before it throws a failure")
