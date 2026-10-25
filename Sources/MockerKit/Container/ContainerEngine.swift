@@ -80,6 +80,16 @@ public actor ContainerEngine {
         return info
     }
 
+    public func runRemoved(_ requested: ContainerConfig) async throws -> (error: String, exitCode: Int32) {
+        var containerConfig = requested
+        containerConfig.rm = true
+        let name = containerConfig.name ?? generateName()
+
+        let args = Self.buildRunArguments(name: name, config: containerConfig, attached: true)
+        let (output, exitCode) = try await runCLI(args)
+        return (Self.runtimeError(output), exitCode)
+    }
+
     /// The runtime's error from `container run` or `create` output, without the progress
     /// lines (`[1/6] Fetching image [0s]`) it prints to the same stream, and without its
     /// own `Error: ` prefix, which mocker adds again.

@@ -133,3 +133,44 @@ struct ComposeVolumeLifecycleTests {
         }
     }
 }
+
+@Suite("Compose volume seeding")
+struct ComposeVolumeSeedTests {
+    private let compose = try! ComposeFile.parse("""
+    services:
+      kafka:
+        image: confluentinc/cp-kafka:7.5.0
+        volumes:
+          - kafka_data:/var/lib/kafka/data
+          - empty:/empty:ro,nocopy
+          - named:/named:ro
+          - ./conf:/etc/kafka
+          - /scratch
+          - undeclared:/undeclared
+    volumes:
+      kafka_data:
+      empty:
+      named:
+        name: shared-named
+    """)
+
+    @Test("A native volume up just created is seeded from the image at its mount point")
+    func seedsCreatedVolumes() {
+        let seeds = ComposeOrchestrator.volumeSeeds(
+            for: compose.services["kafka"]!, composeFile: compose, projectName: "proj",
+            created: ["proj-kafka_data", "proj-empty", "shared-named"])
+
+        #expect(seeds == [
+            .init(volume: "proj-kafka_data", path: "/var/lib/kafka/data"),
+            .init(volume: "shared-named", path: "/named"),
+        ])
+    }
+
+    @Test("A volume that already existed is left as it is")
+    func skipsExistingVolumes() {
+        let seeds = ComposeOrchestrator.volumeSeeds(
+            for: compose.services["kafka"]!, composeFile: compose, projectName: "proj", created: [])
+
+        #expect(seeds.isEmpty)
+    }
+}
