@@ -231,6 +231,60 @@ struct ComposeOrchestratorTests {
         #expect(entries.map(\.name) == ["db"])
     }
 
+    @Test("Network aliases resolve, for the others and for the service itself")
+    func hostsListNetworkAliases() throws {
+        let compose = try ComposeFile.parse("""
+        services:
+          miniflake:
+            image: miniflake
+            networks:
+              default:
+                aliases: [peakgames.miniflake.local, miniflake]
+          app:
+            image: app
+        networks:
+          default:
+        """)
+        let miniflake = ContainerInfo(
+            id: "p-miniflake-1", name: "p-miniflake-1", image: "miniflake", state: .running, status: "Up",
+            created: Date(), networkAddress: "10.0.0.7")
+
+        let others = ComposeOrchestrator.namedAddresses(of: [("miniflake", miniflake)], composeFile: compose)
+        #expect(others.map(\.name) == ["miniflake", "peakgames.miniflake.local"])
+        let appHosts = ComposeOrchestrator.updatedHosts(
+            nil, entries: others, managed: ComposeOrchestrator.managedHostNames(compose))
+        #expect(appHosts == "127.0.0.1 localhost\n10.0.0.7 miniflake\n10.0.0.7 peakgames.miniflake.local\n")
+
+        let own = ComposeOrchestrator.hostsEntries(
+            service: "miniflake", hostname: "p-miniflake-1", address: "10.0.0.7",
+            aliases: ComposeOrchestrator.aliases(of: "miniflake", composeFile: compose), others: [])
+        #expect(own.map(\.name) == ["p-miniflake-1", "miniflake", "peakgames.miniflake.local"])
+    }
+
+    @Test("Only the aliases of the network the service joins apply")
+    func aliasesOfJoinedNetworkOnly() throws {
+        let compose = try ComposeFile.parse("""
+        services:
+          db:
+            image: mysql
+            networks:
+              backend:
+                aliases: [mysql.local]
+              frontend:
+                aliases: [db.public]
+          web:
+            image: nginx
+            networks: [frontend]
+        networks:
+          backend:
+          frontend:
+        """)
+
+        #expect(ComposeOrchestrator.aliases(of: "db", composeFile: compose) == ["mysql.local"])
+        #expect(ComposeOrchestrator.aliases(of: "web", composeFile: compose) == [])
+        #expect(ComposeOrchestrator.managedHostNames(compose) == ["db", "web", "mysql.local"])
+    }
+
     @Test("A new hosts file has localhost and the given services")
     func newHostsFile() {
         let hosts = ComposeOrchestrator.updatedHosts(nil, entries: [("db", "10.0.0.2"), ("web", "10.0.0.4")], managed: ["db", "web"])

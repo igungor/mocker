@@ -743,19 +743,44 @@ public actor ComposeOrchestrator {
             .appendingPathComponent("hosts")
     }
 
-    /// What a service's hosts file lists: its own hostname and its service name, since
-    /// Docker's DNS answers a container for both, then the other services.
+    /// What a service's hosts file lists: its own hostname, its service name and its
+    /// aliases, since Docker's DNS answers a container for all of them, then the others.
     nonisolated static func hostsEntries(
         service: String,
         hostname: String,
         address: String,
+        aliases: [String] = [],
         others: [(name: String, address: String)]
     ) -> [(name: String, address: String)] {
         var own = [(name: hostname, address: address)]
-        if service != hostname {
-            own.append((name: service, address: address))
+        for name in [service] + aliases where !own.contains(where: { $0.name == name }) {
+            own.append((name: name, address: address))
         }
         return own + others.sorted { $0.name < $1.name }
+    }
+
+    /// The aliases a service has on the network it joins. The runtime attaches only that
+    /// one, so aliases on its other networks would name an address nobody reaches.
+    nonisolated static func aliases(of service: String, composeFile: ComposeFile) -> [String] {
+        guard let service = composeFile.services[service], let network = service.networks.first else { return [] }
+        return service.networkAliases[network] ?? []
+    }
+
+    nonisolated static func namedAddresses(
+        of running: [(service: String, info: ContainerInfo)],
+        composeFile: ComposeFile
+    ) -> [(name: String, address: String)] {
+        running.flatMap { service, info in
+            var names = [service]
+            for alias in aliases(of: service, composeFile: composeFile) where !names.contains(alias) {
+                names.append(alias)
+            }
+            return names.map { (name: $0, address: info.networkAddress) }
+        }
+    }
+
+    nonisolated static func managedHostNames(_ composeFile: ComposeFile) -> Set<String> {
+        Set(composeFile.services.keys).union(composeFile.services.keys.flatMap { aliases(of: $0, composeFile: composeFile) })
     }
 
     /// `current` /etc/hosts updated to map each of `entries` and nothing else under the
@@ -819,11 +844,11 @@ public actor ComposeOrchestrator {
 
     /// The hosts file a new container starts with: every running service but itself.
     private func writeHostsFileBeforeStart(_ serviceName: String, composeFile: ComposeFile) async throws -> URL {
-        let others = try await runningServices()
-            .filter { $0.service != serviceName }
-            .map { (name: $0.service, address: $0.info.networkAddress) }
-            .sorted { $0.name < $1.name }
-        return try writeHostsFile(for: serviceName, entries: others, managed: Set(composeFile.services.keys), fresh: true)
+        let others = Self.namedAddresses(
+            of: try await runningServices().filter { $0.service != serviceName },
+            composeFile: composeFile
+        ).sorted { $0.name < $1.name }
+        return try writeHostsFile(for: serviceName, entries: others, managed: Self.managedHostNames(composeFile), fresh: true)
     }
 
     /// Update every running container's hosts file with its own name and the others'.
@@ -843,11 +868,15 @@ public actor ComposeOrchestrator {
         let running = try await runningServices()
         for (service, info) in running {
             let hostname = composeFile.services[service]?.hostname ?? info.name
-            let others = running
-                .filter { $0.service != service }
-                .map { (name: $0.service, address: $0.info.networkAddress) }
-            let entries = Self.hostsEntries(service: service, hostname: hostname, address: info.networkAddress, others: others)
-            _ = try writeHostsFile(for: service, entries: entries, managed: Set(composeFile.services.keys).union([hostname]))
+            let others = Self.namedAddresses(of: running.filter { $0.service != service }, composeFile: composeFile)
+            let entries = Self.hostsEntries(
+                service: service,
+                hostname: hostname,
+                address: info.networkAddress,
+                aliases: Self.aliases(of: service, composeFile: composeFile),
+                others: others
+            )
+            _ = try writeHostsFile(for: service, entries: entries, managed: Self.managedHostNames(composeFile).union([hostname]))
         }
     }
 

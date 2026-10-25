@@ -611,6 +611,9 @@ public struct ComposeService: Sendable {
     public var ports: [String]
     public var volumes: [String]
     public var networks: [String]
+    /// `aliases` per network, from the mapping form of `networks:`. Not in the config
+    /// hash: they live in the hosts files, which `up` rewrites without a new container.
+    public var networkAliases: [String: [String]] = [:]
     public var dependsOn: [String]
     public var restart: String?
     public var labels: [String: String]
@@ -669,10 +672,15 @@ public struct ComposeService: Sendable {
         // Both spellings are valid: a list of names, or a mapping whose keys are the
         // names and whose values carry per-network options such as `aliases`.
         let networks: [String]
+        var networkAliases: [String: [String]] = [:]
         if let list = dict["networks"] as? [Any] {
             networks = list.compactMap { "\($0)" }
         } else if let mapping = dict["networks"] as? [String: Any] {
             networks = mapping.keys.sorted()
+            for (network, options) in mapping {
+                guard let aliases = (options as? [String: Any])?["aliases"] as? [Any] else { continue }
+                networkAliases[network] = aliases.map { "\($0)" }
+            }
         } else {
             networks = []
         }
@@ -733,6 +741,7 @@ public struct ComposeService: Sendable {
             ports: ports,
             volumes: volumes,
             networks: networks,
+            networkAliases: networkAliases,
             dependsOn: dependsOn,
             restart: restartValue,
             labels: labels,
@@ -777,6 +786,7 @@ public struct ComposeService: Sendable {
             ports: other.ports.isEmpty ? ports : other.ports,
             volumes: other.volumes.isEmpty ? volumes : other.volumes,
             networks: other.networks.isEmpty ? networks : other.networks,
+            networkAliases: other.networks.isEmpty ? networkAliases : other.networkAliases,
             dependsOn: other.dependsOn.isEmpty ? dependsOn : other.dependsOn,
             restart: other.restart ?? restart,
             labels: labels.merging(other.labels) { _, new in new },
