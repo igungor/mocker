@@ -49,6 +49,45 @@ struct ComposeFileTests {
         #expect(ComposeService.hash(of: native) != ComposeService.hash(of: base.services["app"]!))
     }
 
+    @Test("Parse user in every form; a later file's user wins; it changes the config hash")
+    func parseUser() throws {
+        let base = try ComposeFile.parse("""
+        services:
+          root:
+            image: alpine:latest
+            user: root
+          pair:
+            image: alpine:latest
+            user: "1000:1000"
+          uid:
+            image: alpine:latest
+            user: 1000
+          unset:
+            image: alpine:latest
+        """)
+        let overlay = try ComposeFile.parse("""
+        services:
+          root:
+            user: nobody
+        """)
+
+        #expect(base.services["root"]?.user == "root")
+        #expect(base.services["pair"]?.user == "1000:1000")
+        #expect(base.services["uid"]?.user == "1000")
+        #expect(base.services["unset"]?.user == nil)
+        #expect(ComposeFile.merge([base, overlay]).services["root"]?.user == "nobody")
+        #expect(ComposeFile.merge([overlay, base]).services["root"]?.user == "root")
+
+        var imageUser = base.services["root"]!
+        imageUser.user = nil
+        #expect(ComposeService.hash(of: imageUser) != ComposeService.hash(of: base.services["root"]!))
+
+        // Left out when unset, so containers created before `user:` was read keep their hash.
+        let unset = try JSONEncoder().encode(base.services["unset"]!)
+        let json = try #require(try JSONSerialization.jsonObject(with: unset) as? [String: Any])
+        #expect(json["user"] == nil)
+    }
+
     @Test("Parse entrypoint in list form")
     func parseEntrypointList() throws {
         let compose = try ComposeFile.parse("""
