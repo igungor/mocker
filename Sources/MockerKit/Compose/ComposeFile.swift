@@ -535,10 +535,11 @@ public struct ComposeFile: Sendable {
     }
 
     /// Throw when a service joins a network the file never declares — the container
-    /// would otherwise be started against a network nothing creates.
+    /// would otherwise be started against a network nothing creates. `default` always
+    /// exists, declared or not, as in Docker Compose.
     public func validateNetworkReferences() throws {
         for service in services.values.sorted(by: { $0.name < $1.name }) {
-            for network in service.networks where networks[network] == nil {
+            for network in service.networks where network != "default" && networks[network] == nil {
                 throw MockerError.composeParseError(
                     "service \(service.name) refers to undefined network \(network)")
             }

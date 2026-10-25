@@ -448,9 +448,8 @@ public actor ComposeOrchestrator {
             ?? implicitDefaultNetwork(projectName: projectName)
     }
 
-    /// Only needed when some service does not name a network of its own.
     nonisolated static func implicitDefaultNetworkNeeded(composeFile: ComposeFile) -> Bool {
-        composeFile.services.values.contains { $0.networks.isEmpty }
+        composeFile.services.values.contains { $0.networks.isEmpty || $0.networks.contains("default") }
             && composeFile.networks["default"] == nil
     }
 

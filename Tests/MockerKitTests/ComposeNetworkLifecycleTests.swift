@@ -198,6 +198,39 @@ struct ComposeNetworkLifecycleTests {
 
         #expect(throws: Never.self) { try compose.validateNetworkReferences() }
     }
+
+    @Test("A service may name the default network without the file declaring it", arguments: [
+        "services:\n  web:\n    image: nginx\n    networks: [default]\n",
+        "services:\n  web:\n    image: nginx\n    networks:\n      default:\n        aliases: [web.local]\n",
+    ])
+    func implicitDefaultNetworkCanBeNamed(yaml: String) throws {
+        let compose = try parse(yaml)
+
+        #expect(throws: Never.self) { try compose.validateNetworkReferences() }
+        #expect(ComposeOrchestrator.networksToCreate(composeFile: compose, projectName: "proj")
+            .map(\.name) == ["proj-default"])
+        #expect(ComposeOrchestrator.networkForService(
+            compose.services["web"]!, composeFile: compose, projectName: "proj") == "proj-default")
+    }
+
+    @Test("A service naming default shares the network of one that names none")
+    func namedAndUnnamedDefaultAreOneNetwork() throws {
+        let compose = try parse("""
+        services:
+          web:
+            image: nginx
+            networks: [default]
+          db:
+            image: mysql
+        """)
+
+        #expect(ComposeOrchestrator.networksToCreate(composeFile: compose, projectName: "proj")
+            .map(\.name) == ["proj-default"])
+        #expect(ComposeOrchestrator.networkForService(
+            compose.services["web"]!, composeFile: compose, projectName: "proj")
+            == ComposeOrchestrator.networkForService(
+                compose.services["db"]!, composeFile: compose, projectName: "proj"))
+    }
 }
 
 @Suite("Compose down --rmi")
