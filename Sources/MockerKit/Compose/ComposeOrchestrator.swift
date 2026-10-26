@@ -131,12 +131,14 @@ public actor ComposeOrchestrator {
         // must use them as they are and never create (or later remove) them.
         // A volume several services mount is a directory volume: a native one attaches to
         // only one running container, since each container is its own VM.
+        var createdNativeVolumes: Set<String> = []
         for (fullName, driver) in Self.volumesToCreate(composeFile: composeFile, projectName: projectName) {
             do {
                 if shared.contains(fullName) {
                     _ = try await volumeManager.createDirectory(name: fullName)
                 } else {
                     _ = try await volumeManager.create(name: fullName, driver: driver)
+                    createdNativeVolumes.insert(fullName)
                 }
                 events.append(.volumeCreated(fullName))
             } catch {
@@ -219,9 +221,17 @@ public actor ComposeOrchestrator {
 
         for serviceName in order {
             guard let service = composeFile.services[serviceName] else { continue }
+
+            let removal = removals[serviceName]
+            let seeds = Self.volumeSeeds(
+                for: service, composeFile: composeFile, projectName: projectName, created: createdNativeVolumes)
+            let beforeStart: Task<Void, Never>? = seeds.isEmpty ? removal : Task {
+                await removal?.value
+                await self.seed(seeds, from: service)
+            }
             let ready = Self.ready(
                 after: dependenciesReady(of: service, composeFile: composeFile, startups: startups, completions: completions),
-                removal: removals[serviceName]
+                removal: beforeStart
             )
 
             if awaited.contains(serviceName) {
@@ -623,6 +633,63 @@ public actor ComposeOrchestrator {
         Task {
             await removal?.value
             try await dependencies.value
+        }
+    }
+
+    struct VolumeSeed: Equatable, Sendable {
+        var volume: String
+        var path: String
+    }
+
+    /// Docker fills a new named volume with what the image has at its mount point, and
+    /// gives it that directory's owner and mode, the first time a container mounts it.
+    /// A directory volume can't take an owner, and `nocopy` asks for an empty volume.
+    nonisolated static func volumeSeeds(
+        for service: ComposeService,
+        composeFile: ComposeFile,
+        projectName: String,
+        created: Set<String>
+    ) -> [VolumeSeed] {
+        service.volumes.compactMap { spec in
+            let parts = spec.split(separator: ":", maxSplits: 2).map(String.init)
+            guard parts.count >= 2, let volume = composeFile.volumes[parts[0]] else { return nil }
+
+            let name = volume.runtimeName(projectName: projectName)
+            let options = parts.count > 2 ? parts[2].split(separator: ",") : []
+            guard created.contains(name), !options.contains("nocopy") else { return nil }
+            return VolumeSeed(volume: name, path: parts[1])
+        }
+    }
+
+    /// A new native volume is an ext4 file system with only `lost+found`, which Docker's
+    /// volumes don't have and Kafka, for one, refuses to start with.
+    static let volumeSeedScript = """
+        case "$(ls -A /mocker-seed)" in ""|lost+found) ;; *) exit 0 ;; esac
+        rmdir /mocker-seed/lost+found 2>/dev/null
+        [ -d "$1" ] || exit 0
+        cp -a "$1/." /mocker-seed/ && chown "$(stat -c %u:%g "$1")" /mocker-seed && chmod "$(stat -c %a "$1")" /mocker-seed
+        """
+
+    /// An image without `/bin/sh` can't be seeded, so a failure leaves the volume as it
+    /// was, with a warning.
+    private func seed(_ seeds: [VolumeSeed], from service: ComposeService) async {
+        let image = service.buildTag(projectName: projectName)
+        for seed in seeds {
+            let config = ContainerConfig(
+                image: image,
+                command: ["-c", Self.volumeSeedScript, "sh", seed.path],
+                volumes: [VolumeMount(source: seed.volume, destination: "/mocker-seed")],
+                user: "0",
+                entrypoint: "/bin/sh",
+                platform: service.platform
+            )
+
+            let result = try? await engine.runRemoved(config)
+            guard result?.exitCode != 0 else { continue }
+
+            let reason = result?.error.split(separator: "\n").first.map(String.init) ?? "the runtime failed"
+            FileHandle.standardError.write(Data(
+                "WARNING: volume \(seed.volume) could not be filled from \(image) at \(seed.path): \(reason)\n".utf8))
         }
     }
 
