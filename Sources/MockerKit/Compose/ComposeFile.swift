@@ -546,6 +546,10 @@ public struct ComposeFile: Sendable {
         }
     }
 
+    public func containerName(_ service: String, projectName: String, index: Int = 1) -> String {
+        services[service]?.runtimeName(projectName: projectName, index: index) ?? "\(projectName)-\(service)-\(index)"
+    }
+
     /// Throw `no such service: <name>` for any requested name absent from the project,
     /// matching `docker compose`'s behaviour of erroring instead of silently doing nothing.
     /// Only literal, user-typed names are checked — transitive dependencies are resolved
@@ -619,6 +623,7 @@ public struct ComposeService: Sendable {
     public var restart: String?
     public var labels: [String: String]
     public var hostname: String?
+    public var containerName: String? = nil
     public var workingDir: String?
     public var configs: [ComposeFileReference] = []
     public var secrets: [ComposeFileReference] = []
@@ -652,6 +657,7 @@ public struct ComposeService: Sendable {
         case memLimit, cpus, memReservation, cpusReservation, memSwapLimit
         case shmSize, pidsLimit
         case restartPolicyDelay, restartPolicyMaxAttempts, restartPolicyWindow
+        case containerName
     }
 
     /// Compute a stable `sha256:<hex>` hash of the normalized service config.
@@ -749,6 +755,7 @@ public struct ComposeService: Sendable {
             restart: restartValue,
             labels: labels,
             hostname: dict["hostname"] as? String,
+            containerName: dict["container_name"] as? String,
             workingDir: dict["working_dir"] as? String,
             configs: ComposeFileReference.parseList(dict["configs"]),
             secrets: ComposeFileReference.parseList(dict["secrets"]),
@@ -775,6 +782,11 @@ public struct ComposeService: Sendable {
         image ?? "\(projectName)-\(name):latest"
     }
 
+    public func runtimeName(projectName: String, index: Int = 1) -> String {
+        if index == 1, let containerName { return containerName }
+        return "\(projectName)-\(name)-\(index)"
+    }
+
     /// Overlay `other` onto `self` (other wins) for `docker compose` multi-file
     /// merge. Scalars take the later value when present; `environment` and
     /// `labels` are field-merged (later wins on key collision); list-valued
@@ -795,6 +807,7 @@ public struct ComposeService: Sendable {
             restart: other.restart ?? restart,
             labels: labels.merging(other.labels) { _, new in new },
             hostname: other.hostname ?? hostname,
+            containerName: other.containerName ?? containerName,
             workingDir: other.workingDir ?? workingDir,
             configs: other.configs.isEmpty ? configs : other.configs,
             secrets: other.secrets.isEmpty ? secrets : other.secrets,
@@ -997,6 +1010,7 @@ extension ComposeService: Encodable {
         try c.encodeIfPresent(restart, forKey: .restart)
         try c.encode(labels, forKey: .labels)
         try c.encodeIfPresent(hostname, forKey: .hostname)
+        try c.encodeIfPresent(containerName, forKey: .containerName)
         try c.encodeIfPresent(workingDir, forKey: .workingDir)
         if !configs.isEmpty { try c.encode(configs, forKey: .configs) }
         if !secrets.isEmpty { try c.encode(secrets, forKey: .secrets) }

@@ -144,6 +144,39 @@ struct ComposeFileTests {
         #expect(ComposeFile.merge([base, noEntrypoint]).services["app"]?.entrypoint == ["/bin/sh", "-c"])
     }
 
+    @Test("Parse container_name; it names the service's container, and a later file's wins")
+    func parseContainerName() throws {
+        let base = try ComposeFile.parse("""
+        services:
+          kafka:
+            image: confluentinc/cp-kafka:7.5.0
+            container_name: kafka
+          web:
+            image: nginx
+        """)
+        let overlay = try ComposeFile.parse("""
+        services:
+          kafka:
+            container_name: broker
+        """)
+
+        #expect(base.services["kafka"]?.containerName == "kafka")
+        #expect(base.containerName("kafka", projectName: "proj") == "kafka")
+        #expect(base.containerName("web", projectName: "proj") == "proj-web-1")
+        // Only one container can have the name, as in Docker Compose, which refuses to scale it.
+        #expect(base.containerName("kafka", projectName: "proj", index: 2) == "proj-kafka-2")
+        #expect(ComposeFile.merge([base, overlay]).containerName("kafka", projectName: "proj") == "broker")
+
+        var unnamed = base.services["kafka"]!
+        unnamed.containerName = nil
+        #expect(ComposeService.hash(of: unnamed) != ComposeService.hash(of: base.services["kafka"]!))
+
+        // Left out when unset, so containers created before it was read keep their hash.
+        let web = try JSONEncoder().encode(base.services["web"]!)
+        let json = try #require(try JSONSerialization.jsonObject(with: web) as? [String: Any])
+        #expect(json["containerName"] == nil)
+    }
+
     @Test("Merge overlays later files over earlier ones")
     func mergeOverlay() throws {
         let base = try ComposeFile.parse("""

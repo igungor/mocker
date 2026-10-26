@@ -68,4 +68,18 @@ struct ComposeDryRunTests {
         #expect(ComposeStop.dryRunTargets(compose, "proj", []) == ["proj-db-1", "proj-web-1"])
         #expect(ComposeStop.dryRunTargets(compose, "proj", ["web"]) == ["proj-web-1"])
     }
+
+    @Test("Dry-run targets use a service's container_name")
+    func dryRunTargetsContainerName() throws {
+        let compose = try ComposeFile.parse("""
+        services:
+          web:
+            image: nginx
+          kafka:
+            image: kafka
+            container_name: kafka
+        """)
+
+        #expect(ComposeStop.dryRunTargets(compose, "proj", []) == ["kafka", "proj-web-1"])
+    }
 }
