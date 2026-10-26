@@ -1005,6 +1005,7 @@ public actor ComposeOrchestrator {
             workingDir: service.workingDir,
             hostname: service.hostname,
             restartPolicy: service.restart.flatMap { RestartPolicy(rawValue: $0) } ?? .no,
+            user: service.user,
             entrypoint: exec.entrypoint,
             platform: service.platform,
             // `restartPolicy` and `shmSize` (like the soft mem/cpu reservations) are stored on the

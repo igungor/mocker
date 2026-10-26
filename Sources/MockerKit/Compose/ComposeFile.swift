@@ -625,6 +625,8 @@ public struct ComposeService: Sendable {
     public var healthcheck: HealthCheck? = nil
     /// `platform:` (e.g. `linux/amd64`): the image platform to run.
     public var platform: String? = nil
+    /// `user:` (`name`, `uid` or `uid:gid`): who the container's process runs as.
+    public var user: String? = nil
 
     // Resource limits — Docker Compose spec (legacy top-level + deploy.resources)
     public var memLimit: String?
@@ -642,7 +644,7 @@ public struct ComposeService: Sendable {
 
     private enum HashCodingKeys: String, CodingKey {
         case name, image, command, entrypoint, environment, ports, volumes, networks
-        case restart, labels, hostname, workingDir, platform, configs, secrets
+        case restart, labels, hostname, workingDir, platform, user, configs, secrets
         case memLimit, cpus, memReservation, cpusReservation, memSwapLimit
         case shmSize, pidsLimit
         case restartPolicyDelay, restartPolicyMaxAttempts, restartPolicyWindow
@@ -744,6 +746,7 @@ public struct ComposeService: Sendable {
             dependsOnConditions: parseDependsOnConditions(dict["depends_on"]),
             healthcheck: HealthCheck.parse(dict["healthcheck"]),
             platform: dict["platform"] as? String,
+            user: parseStringValue(dict["user"]),
             memLimit: memLimit,
             cpus: cpus,
             memReservation: memReservation,
@@ -788,6 +791,7 @@ public struct ComposeService: Sendable {
             dependsOnConditions: other.dependsOn.isEmpty ? dependsOnConditions : other.dependsOnConditions,
             healthcheck: other.healthcheck ?? healthcheck,
             platform: other.platform ?? platform,
+            user: other.user ?? user,
             memLimit: other.memLimit ?? memLimit,
             cpus: other.cpus ?? cpus,
             memReservation: other.memReservation ?? memReservation,
@@ -986,6 +990,7 @@ extension ComposeService: Encodable {
         if !configs.isEmpty { try c.encode(configs, forKey: .configs) }
         if !secrets.isEmpty { try c.encode(secrets, forKey: .secrets) }
         try c.encodeIfPresent(platform, forKey: .platform)
+        try c.encodeIfPresent(user, forKey: .user)
         try c.encodeIfPresent(memLimit, forKey: .memLimit)
         try c.encodeIfPresent(cpus, forKey: .cpus)
         try c.encodeIfPresent(memReservation, forKey: .memReservation)
