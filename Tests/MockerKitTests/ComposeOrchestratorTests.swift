@@ -212,6 +212,162 @@ struct ComposeOrchestratorTests {
         #expect(ComposeOrchestrator.servicesAwaitedForCompletion(compose) == ["migrate"])
     }
 
+    // MARK: - compose run
+
+    /// The service's container config, as `containerConfig` makes it for `up`.
+    private static func serviceContainer(_ service: ComposeService) -> ContainerConfig {
+        let exec = ComposeOrchestrator.resolveExec(entrypoint: service.entrypoint, command: service.command)
+        return ContainerConfig(
+            name: "p-\(service.name)-1",
+            image: service.image ?? "",
+            command: exec.command,
+            environment: service.environment,
+            ports: try! service.ports.map { try PortMapping.parse($0) },
+            volumes: try! ComposeOrchestrator.resolveVolumeMounts(
+                service.volumes, projectDir: URL(fileURLWithPath: "/proj"), namedVolumeSources: [:]),
+            network: "p-default",
+            labels: service.labels.merging(["com.mocker.compose.config-hash": "abc"]) { _, new in new },
+            workingDir: service.workingDir,
+            restartPolicy: .always,
+            user: service.user,
+            entrypoint: exec.entrypoint,
+            memory: service.memLimit
+        )
+    }
+
+    private static let loader = """
+        services:
+          loader:
+            image: golang
+            environment:
+              SF_EMU_HOST: peakgames.snowflake.local
+            working_dir: /config
+            user: "1000"
+            volumes:
+              - /home/me/bin:/bin-cdc:ro
+              - ./cdc-loader:/config:ro
+            ports: ["8080:8080"]
+            mem_limit: 4g
+            labels:
+              team: bigdata
+            command: ["/bin-cdc/cdc-loader", "-config", "/config/config.toml"]
+            restart: always
+        """
+
+    @Test("A run keeps the service's volumes, environment, working directory, user and command, as Docker Compose does")
+    func runKeepsServiceConfig() throws {
+        let service = try #require(try ComposeFile.parse(Self.loader).services["loader"])
+
+        let config = try ComposeOrchestrator.oneOffConfig(
+            Self.serviceContainer(service), service: service, options: ComposeRunOptions(), volumes: [], projectName: "p")
+
+        #expect(config.volumes.map { "\($0.source):\($0.destination):\($0.readOnly)" }
+            == ["/home/me/bin:/bin-cdc:true", "/proj/cdc-loader:/config:true"])
+        #expect(config.environment == ["SF_EMU_HOST": "peakgames.snowflake.local"])
+        #expect(config.workingDir == "/config")
+        #expect(config.user == "1000")
+        #expect(config.entrypoint == nil)
+        #expect(config.command == ["/bin-cdc/cdc-loader", "-config", "/config/config.toml"])
+        #expect(config.memory == "4g")
+        #expect(config.network == "p-default")
+        #expect(config.name == "p-loader-1")
+    }
+
+    @Test("A run's flags replace the service's command, entrypoint, user and working directory, and add to its environment")
+    func runFlagsOverrideService() throws {
+        let service = try #require(try ComposeFile.parse(Self.loader).services["loader"])
+        var options = ComposeRunOptions()
+        options.command = ["-la", "/bin-cdc", "/config"]
+        options.entrypoint = "ls"
+        options.environment = ["SF_EMU_HOST": "other", "EXTRA": "1"]
+        options.user = "root"
+        options.workingDir = "/tmp"
+
+        let config = try ComposeOrchestrator.oneOffConfig(
+            Self.serviceContainer(service), service: service, options: options, volumes: [], projectName: "p")
+
+        #expect(config.entrypoint == "ls")
+        #expect(config.command == ["-la", "/bin-cdc", "/config"])
+        #expect(config.environment == ["SF_EMU_HOST": "other", "EXTRA": "1"])
+        #expect(config.user == "root")
+        #expect(config.workingDir == "/tmp")
+        #expect(config.volumes.count == 2)
+    }
+
+    @Test("An entrypoint flag with arguments runs them ahead of the service's command")
+    func runEntrypointWithArguments() throws {
+        let service = try #require(try ComposeFile.parse(Self.loader).services["loader"])
+        var options = ComposeRunOptions()
+        options.entrypoint = "sh -c"
+
+        let config = try ComposeOrchestrator.oneOffConfig(
+            Self.serviceContainer(service), service: service, options: options, volumes: [], projectName: "p")
+
+        #expect(config.entrypoint == "sh")
+        #expect(config.command == ["-c", "/bin-cdc/cdc-loader", "-config", "/config/config.toml"])
+    }
+
+    @Test("A run's -v adds a mount, and replaces the service's at the same path")
+    func runVolumeFlags() throws {
+        let service = try #require(try ComposeFile.parse(Self.loader).services["loader"])
+        let volumes = [VolumeMount(source: "/elsewhere", destination: "/config"), VolumeMount(source: "/src", destination: "/src")]
+
+        let config = try ComposeOrchestrator.oneOffConfig(
+            Self.serviceContainer(service), service: service, options: ComposeRunOptions(), volumes: volumes, projectName: "p")
+
+        #expect(config.volumes.map { "\($0.source):\($0.destination)" } == ["/home/me/bin:/bin-cdc", "/elsewhere:/config", "/src:/src"])
+    }
+
+    @Test("A run publishes the service's ports only with --service-ports, and those of -p")
+    func runPorts() throws {
+        let service = try #require(try ComposeFile.parse(Self.loader).services["loader"])
+        var options = ComposeRunOptions()
+        options.ports = ["9090:9090"]
+
+        let without = try ComposeOrchestrator.oneOffConfig(
+            Self.serviceContainer(service), service: service, options: options, volumes: [], projectName: "p")
+        options.servicePorts = true
+        let with = try ComposeOrchestrator.oneOffConfig(
+            Self.serviceContainer(service), service: service, options: options, volumes: [], projectName: "p")
+
+        #expect(without.ports.map(\.description) == ["9090:9090/tcp"])
+        #expect(with.ports.map(\.description) == ["8080:8080/tcp", "9090:9090/tcp"])
+    }
+
+    @Test("A run container is a one-off: no config hash for up to keep or replace it, and no restarts")
+    func runContainerIsOneOff() throws {
+        let service = try #require(try ComposeFile.parse(Self.loader).services["loader"])
+        var options = ComposeRunOptions()
+        options.labels = ["extra": "yes"]
+        options.rm = true
+
+        let config = try ComposeOrchestrator.oneOffConfig(
+            Self.serviceContainer(service), service: service, options: options, volumes: [], projectName: "p")
+        let container = ContainerInfo(
+            id: "x", name: "x", image: "golang", state: .running, status: "Up", created: Date(), labels: config.labels)
+
+        #expect(config.labels == [
+            "team": "bigdata",
+            "extra": "yes",
+            "com.mocker.compose.project": "p",
+            "com.mocker.compose.service": "loader",
+            "com.mocker.compose.oneoff": "True",
+        ])
+        #expect(config.restartPolicy == .no)
+        #expect(config.rm)
+        #expect(ComposeOrchestrator.isOneOff(container))
+        #expect(ComposeOrchestrator.belongs(container, toProject: "p"))
+    }
+
+    @Test("A run container is named <project>-<service>-run-<id>, as in Docker Compose")
+    func runContainerName() {
+        let first = ComposeOrchestrator.oneOffName(service: "loader", projectName: "p")
+        let second = ComposeOrchestrator.oneOffName(service: "loader", projectName: "p")
+
+        #expect(first.wholeMatch(of: /p-loader-run-[0-9a-f]{12}/) != nil)
+        #expect(first != second)
+    }
+
     // MARK: - Service hostnames
 
     @Test("A container finds itself by its service name too, as Docker's DNS answers both")

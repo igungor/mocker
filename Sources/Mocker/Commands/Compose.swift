@@ -1101,40 +1101,31 @@ struct ComposeRun: AsyncParsableCommand {
     }
 
     func run() async throws {
-        let (composeFile, _, _) = try options.loadCompose(targets: [service])
+        let (composeFile, project, projectDir) = try options.loadCompose(targets: [service])
         let config = MockerConfig()
 
         guard let svc = composeFile.services[service] else {
             throw MockerError.operationFailed("no such service: \(service)")
         }
 
-        guard let image = svc.image else {
-            throw MockerError.operationFailed("service \(service) has no image")
-        }
-
         if options.dryRun {
-            ComposeDryRun.report("run", targets: [image])
+            ComposeDryRun.report("run", targets: [svc.buildTag(projectName: project)])
             return
         }
 
+        try config.ensureDirectories()
+
         let engine = try ContainerEngine(config: config)
-
-        var environment: [String: String] = [:]
-        for item in env {
-            let parts = item.split(separator: "=", maxSplits: 1)
-            guard parts.count == 2 else { continue }
-            environment[String(parts[0])] = String(parts[1])
-        }
-
-        let containerConfig = ContainerConfig(
-            image: image,
-            command: command,
-            environment: environment,
-            detach: detach,
-            workingDir: workdir,
-            entrypoint: entrypoint,
-            rm: rm
+        let orchestrator = ComposeOrchestrator(
+            projectName: project,
+            projectDir: projectDir,
+            engine: engine,
+            imageManager: try ImageManager(config: config),
+            networkManager: try NetworkManager(config: config),
+            volumeManager: try VolumeManager(config: config)
         )
+        let containerConfig = try await orchestrator.oneOffConfig(
+            for: service, composeFile: composeFile, options: runOptions(host: ProcessInfo.processInfo.environment))
 
         if detach {
             let container = try await engine.run(containerConfig)
@@ -1143,9 +1134,47 @@ struct ComposeRun: AsyncParsableCommand {
         }
 
         let exitCode = try await engine.runAttached(containerConfig)
+        if rm, let name = containerConfig.name {
+            orchestrator.removeOneOffFiles(name)
+        }
         if exitCode != 0 {
             throw ExitCode(exitCode)
         }
+    }
+
+    /// The flags, for `ComposeOrchestrator.oneOffConfig`.
+    /// - Parameter host: where `-e NAME` without a value takes it from, as in Docker.
+    func runOptions(host: [String: String]) -> ComposeRunOptions {
+        var run = ComposeRunOptions()
+        run.command = command
+        run.entrypoint = entrypoint
+        run.user = user
+        run.workingDir = workdir
+        run.volumes = volume
+        run.ports = publish
+        run.servicePorts = servicePorts
+        run.name = name
+        run.interactive = interactive
+        run.tty = tty
+        run.detach = detach
+        run.rm = rm
+        run.build = build
+
+        for item in env {
+            let parts = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+            if parts.count == 2 {
+                run.environment[parts[0]] = parts[1]
+            } else if let value = host[parts[0]] {
+                run.environment[parts[0]] = value
+            }
+        }
+
+        for item in label {
+            let parts = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+            run.labels[parts[0]] = parts.count == 2 ? parts[1] : ""
+        }
+
+        return run
     }
 }
 
