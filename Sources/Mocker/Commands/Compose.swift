@@ -307,17 +307,19 @@ struct ComposeUp: AsyncParsableCommand {
             volumeManager: volumeManager
         )
 
-        let events = try await orchestrator.up(
-            composeFile: composeFile,
-            // --wait implies detached mode, as in Docker Compose.
-            detach: detach || wait,
-            build: build,
-            noBuild: noBuild,
-            forceRecreate: forceRecreate,
-            noRecreate: noRecreate,
-            wait: wait,
-            waitTimeout: waitTimeout
-        )
+        let events = try await ContainerCreations.shared.endingOnSignal(listed: { await engine.runtimeNames() }) {
+            try await orchestrator.up(
+                composeFile: composeFile,
+                // --wait implies detached mode, as in Docker Compose.
+                detach: detach || wait,
+                build: build,
+                noBuild: noBuild,
+                forceRecreate: forceRecreate,
+                noRecreate: noRecreate,
+                wait: wait,
+                waitTimeout: waitTimeout
+            )
+        }
         // Total is the work actually performed, matching `down`: counting declared
         // resources instead reported `1/2` whenever a volume already existed.
         ComposeFormatter.printEvents(events, total: events.count)
@@ -1551,14 +1553,16 @@ struct ComposeCreate: AsyncParsableCommand {
             volumeManager: volumeManager
         )
 
-        let events = try await orchestrator.up(
-            composeFile: composeFile,
-            detach: true,
-            build: build,
-            noBuild: noBuild,
-            forceRecreate: forceRecreate,
-            noRecreate: noRecreate
-        )
+        let events = try await ContainerCreations.shared.endingOnSignal(listed: { await engine.runtimeNames() }) {
+            try await orchestrator.up(
+                composeFile: composeFile,
+                detach: true,
+                build: build,
+                noBuild: noBuild,
+                forceRecreate: forceRecreate,
+                noRecreate: noRecreate
+            )
+        }
         ComposeFormatter.printEvents(events, total: events.count)
     }
 }

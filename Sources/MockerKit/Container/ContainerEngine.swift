@@ -58,7 +58,7 @@ public actor ContainerEngine {
         }
         let args = Self.buildRunArguments(name: name, config: runtimeConfig)
 
-        let (output, exitCode) = try await runCLI(args)
+        let (output, exitCode) = try await ContainerCreations.shared.track(name) { try await self.runCLI(args) }
 
         guard exitCode == 0 else {
             let msg = Self.runtimeError(output)
@@ -164,7 +164,8 @@ public actor ContainerEngine {
             throw MockerError.containerAlreadyExists(existing.name)
         }
 
-        let (output, createCode) = try await runCLI(Self.buildRunArguments(name: name, config: containerConfig, subcommand: "create"))
+        let createArguments = Self.buildRunArguments(name: name, config: containerConfig, subcommand: "create")
+        let (output, createCode) = try await ContainerCreations.shared.track(name) { try await self.runCLI(createArguments) }
         guard createCode == 0 else {
             let msg = Self.runtimeError(output)
             throw MockerError.operationFailed(msg.isEmpty ? "container create failed" : msg)
@@ -910,6 +911,19 @@ public actor ContainerEngine {
             try await store.save(container)
         }
         return Self.runningNames(lsJSON: output)
+    }
+
+    public func runtimeNames() async -> Set<String>? {
+        guard let (output, status) = try? await runCLI(["ls", "-a", "--format", "json"]), status == 0 else { return nil }
+        return Self.names(lsJSON: output)
+    }
+
+    static func names(lsJSON: String) -> Set<String>? {
+        guard let data = lsJSON.data(using: .utf8),
+              let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return nil }
+
+        return Set(entries.compactMap { ($0["configuration"] as? [String: Any])?["id"] as? String })
     }
 
     /// The names of the containers `container ls --format json` output reports running,
