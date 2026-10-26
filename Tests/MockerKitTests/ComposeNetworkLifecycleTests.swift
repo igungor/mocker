@@ -168,6 +168,8 @@ struct ComposeNetworkLifecycleTests {
         // The mapping form used to parse as no networks at all, silently leaving the
         // container on the runtime's default network.
         #expect(mappingForm.services["web"]?.networks == ["backend", "frontend"])
+        #expect(mappingForm.services["web"]?.networkAliases == ["backend": ["db"]])
+        #expect(listForm.services["web"]?.networkAliases == [:])
     }
 
     @Test("A service joining an undeclared network is an error")
