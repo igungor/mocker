@@ -552,9 +552,23 @@ public actor ContainerEngine {
 
         await portProxy.stop(containerID: container.id)
 
-        _ = try? await runCLI(["delete", container.name])
+        try await Self.deleteInRuntime(container.name, force: force, run: { try await self.runCLI($0) })
         try await store.delete(container.id)
         return container
+    }
+
+    /// The runtime refuses a plain `delete` of a running container. `--force` kills it first.
+    static func deleteInRuntime(
+        _ name: String,
+        force: Bool,
+        run: @Sendable ([String]) async throws -> (String, Int32)
+    ) async throws {
+        let (output, exitCode) = try await run(force ? ["delete", "--force", name] : ["delete", name])
+        guard exitCode != 0, !output.contains("notFound:") else { return }
+
+        let message = runtimeError(output)
+        throw MockerError.operationFailed(
+            message.isEmpty ? "failed to remove container \(name)" : "failed to remove container \(name): \(message)")
     }
 
     // MARK: - Logs
