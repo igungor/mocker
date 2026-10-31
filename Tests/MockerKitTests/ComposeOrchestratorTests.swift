@@ -752,3 +752,57 @@ struct ComposeOrchestratorTests {
         #expect(mounts[0].source == "/tmp/mocker-issue-60-project/shared")
     }
 }
+
+@Suite("ComposeOrchestrator.replace Tests")
+struct ComposeReplaceTests {
+
+    private struct StopFailed: Error {}
+
+    private actor Calls {
+        var log: [String] = []
+        func add(_ call: String) { log.append(call) }
+    }
+
+    private func container(_ state: ContainerState) -> ObservedContainer {
+        ObservedContainer(name: "proj-app-1", serviceName: "app", configHash: nil, network: "proj-default", state: state)
+    }
+
+    @Test("stops a running container before it removes it, as Docker Compose does")
+    func stopsRunning() async {
+        let calls = Calls()
+
+        await ComposeOrchestrator.replace(
+            container(.running),
+            stop: { await calls.add("stop \($0)") },
+            remove: { await calls.add("remove \($0)") }
+        )
+
+        #expect(await calls.log == ["stop proj-app-1", "remove proj-app-1"])
+    }
+
+    @Test("removes a stopped container without stopping it")
+    func removesStopped() async {
+        let calls = Calls()
+
+        await ComposeOrchestrator.replace(
+            container(.stopped),
+            stop: { await calls.add("stop \($0)") },
+            remove: { await calls.add("remove \($0)") }
+        )
+
+        #expect(await calls.log == ["remove proj-app-1"])
+    }
+
+    @Test("still removes a container it couldn't stop")
+    func removesAfterFailedStop() async {
+        let calls = Calls()
+
+        await ComposeOrchestrator.replace(
+            container(.running),
+            stop: { await calls.add("stop \($0)"); throw StopFailed() },
+            remove: { await calls.add("remove \($0)") }
+        )
+
+        #expect(await calls.log == ["stop proj-app-1", "remove proj-app-1"])
+    }
+}

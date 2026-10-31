@@ -189,7 +189,13 @@ public actor ComposeOrchestrator {
                 // In the background: a service's new container waits only for its own old
                 // one, so replacing a service overlaps with what it waits for, such as a build.
                 if let existing = observed.first(where: { $0.serviceName == action.serviceName }) {
-                    removals[action.serviceName] = Task { _ = try? await self.engine.remove(existing.name, force: true) }
+                    removals[action.serviceName] = Task {
+                        await Self.replace(
+                            existing,
+                            stop: { [engine] in _ = try await engine.stop($0, timeout: Self.replaceStopTimeout) },
+                            remove: { [engine] in _ = try await engine.remove($0, force: true) }
+                        )
+                    }
                     if existing.state.isActive { events.append(.containerStopped(existing.name)) }
                     events.append(.containerRemoved(existing.name))
                 }
@@ -625,6 +631,23 @@ public actor ComposeOrchestrator {
         return services.flatMap { name in
             containers.filter { belongs($0, to: name, projectName: projectName) }
         }
+    }
+
+    /// Seconds a container `up` replaces gets to exit before it is killed: Docker's
+    /// default, and `compose stop`'s.
+    static let replaceStopTimeout = 10
+
+    /// Removes the container `up` replaces as Docker Compose does: a running one is
+    /// stopped first, so it gets its stop signal and time to exit, such as to leave a
+    /// Kafka consumer group.
+    nonisolated static func replace(
+        _ container: ObservedContainer,
+        stop: @Sendable (String) async throws -> Void,
+        remove: @Sendable (String) async throws -> Void
+    ) async {
+        if container.state.isActive { try? await stop(container.name) }
+
+        try? await remove(container.name)
     }
 
     /// Ready once the dependencies are and the service's old container, removed in the
