@@ -1,4 +1,5 @@
 import ArgumentParser
+import Foundation
 
 @main
 struct MockerCLI: AsyncParsableCommand {
@@ -63,6 +64,10 @@ struct MockerCLI: AsyncParsableCommand {
     /// since ArgumentParser only parses a subcommand's options after that token.
     /// See `ComposeArgNormalizer`.
     static func main() async {
+        // A shell starts a background job with SIGINT ignored. Docker's CLI handles
+        // SIGINT anyway, so Ctrl-C stops a script's `docker compose up &`. Do the same.
+        signal(SIGINT, SIG_DFL)
+
         let argv = ComposeArgNormalizer.reorder(Array(CommandLine.arguments.dropFirst()))
         do {
             var command = try parseAsRoot(argv)
