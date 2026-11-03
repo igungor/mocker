@@ -1469,6 +1469,10 @@ struct ComposeConfig: AsyncParsableCommand {
                     if let mem = svc.memReservation { lines.append("          memory: \(mem)") }
                 }
             }
+            if !svc.tmpfs.isEmpty {
+                lines.append("    tmpfs:")
+                svc.tmpfs.forEach { lines.append("      - \(yamlScalar($0))") }
+            }
         }
         return lines.joined(separator: "\n")
     }

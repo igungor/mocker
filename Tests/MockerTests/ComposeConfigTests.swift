@@ -223,6 +223,23 @@ struct ComposeConfigTests {
         #expect(reparsed.services["app"]?.environment["URL"] == "http://example.com:8080")
     }
 
+    @Test("compose config prints tmpfs, and the output reads back the same")
+    func composeConfigPrintsTmpfs() throws {
+        let compose = try ComposeFile.parse("""
+        services:
+          app:
+            image: nginx:latest
+            tmpfs:
+              - /code/.venv
+              - /run:size=64m
+        """)
+
+        let output = ComposeConfig.renderConfig(composeFile: compose, projectName: "proj")
+
+        #expect(output.contains("    tmpfs:\n      - /code/.venv\n"))
+        #expect(try ComposeFile.parse(output).services["app"]?.tmpfs == ["/code/.venv", "/run:size=64m"])
+    }
+
     @Test("--rmi accepts only all|local and rejects anything else")
     func rmiValidation() throws {
         #expect(try ComposeDown.parseRemoveImages(nil) == nil)
