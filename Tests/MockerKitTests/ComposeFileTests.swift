@@ -88,6 +88,63 @@ struct ComposeFileTests {
         #expect(json["user"] == nil)
     }
 
+    @Test("Parse tmpfs as a string or a list, options kept; a later file's entries are appended")
+    func parseTmpfs() throws {
+        let base = try ComposeFile.parse("""
+        services:
+          list:
+            image: alpine:latest
+            tmpfs:
+              - /code/.venv
+              - /run:size=64m,mode=1777
+          string:
+            image: alpine:latest
+            tmpfs: /tmp
+          unset:
+            image: alpine:latest
+        """)
+        let overlay = try ComposeFile.parse("""
+        services:
+          list:
+            tmpfs:
+              - /cache
+              - /code/.venv
+        """)
+        let none = try ComposeFile.parse("services:\n  list: {}\n")
+
+        #expect(base.services["list"]?.tmpfs == ["/code/.venv", "/run:size=64m,mode=1777"])
+        #expect(base.services["string"]?.tmpfs == ["/tmp"])
+        #expect(base.services["unset"]?.tmpfs == [])
+        #expect(ComposeFile.merge([base, overlay]).services["list"]?.tmpfs
+            == ["/code/.venv", "/run:size=64m,mode=1777", "/cache"])
+        #expect(ComposeFile.merge([base, none]).services["list"]?.tmpfs
+            == ["/code/.venv", "/run:size=64m,mode=1777"])
+    }
+
+    @Test("tmpfs is in the config hash, and left out when unset so older containers keep their hash")
+    func tmpfsConfigHash() throws {
+        let compose = try ComposeFile.parse("""
+        services:
+          app:
+            image: alpine:latest
+            tmpfs: /code/.venv
+          plain:
+            image: alpine:latest
+        """)
+        let app = try #require(compose.services["app"])
+
+        var moved = app
+        moved.tmpfs = ["/code/.cache"]
+        var removed = app
+        removed.tmpfs = []
+        #expect(ComposeService.hash(of: moved) != ComposeService.hash(of: app))
+        #expect(ComposeService.hash(of: removed) != ComposeService.hash(of: app))
+
+        let plain = try JSONEncoder().encode(compose.services["plain"]!)
+        let json = try #require(try JSONSerialization.jsonObject(with: plain) as? [String: Any])
+        #expect(json["tmpfs"] == nil)
+    }
+
     @Test("Parse entrypoint in list form")
     func parseEntrypointList() throws {
         let compose = try ComposeFile.parse("""

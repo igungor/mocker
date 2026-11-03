@@ -636,6 +636,9 @@ public struct ComposeService: Sendable {
     public var platform: String? = nil
     /// `user:` (`name`, `uid` or `uid:gid`): who the container's process runs as.
     public var user: String? = nil
+    /// `tmpfs:`: paths that get an empty tmpfs, each with optional mount options after a
+    /// `:` (`/run:size=64m`), passed to the runtime as is, as Docker does.
+    public var tmpfs: [String] = []
 
     // Resource limits — Docker Compose spec (legacy top-level + deploy.resources)
     public var memLimit: String?
@@ -653,7 +656,7 @@ public struct ComposeService: Sendable {
 
     private enum HashCodingKeys: String, CodingKey {
         case name, image, command, entrypoint, environment, ports, volumes, networks
-        case restart, labels, hostname, workingDir, platform, user, configs, secrets
+        case restart, labels, hostname, workingDir, platform, user, configs, secrets, tmpfs
         case memLimit, cpus, memReservation, cpusReservation, memSwapLimit
         case shmSize, pidsLimit
         case restartPolicyDelay, restartPolicyMaxAttempts, restartPolicyWindow
@@ -764,6 +767,7 @@ public struct ComposeService: Sendable {
             healthcheck: HealthCheck.parse(dict["healthcheck"]),
             platform: dict["platform"] as? String,
             user: parseStringValue(dict["user"]),
+            tmpfs: parseStringOrList(dict["tmpfs"]),
             memLimit: memLimit,
             cpus: cpus,
             memReservation: memReservation,
@@ -816,6 +820,10 @@ public struct ComposeService: Sendable {
             healthcheck: other.healthcheck ?? healthcheck,
             platform: other.platform ?? platform,
             user: other.user ?? user,
+            // compose-go appends a later file's entries, skipping ones already there.
+            tmpfs: other.tmpfs.reduce(into: tmpfs) { merged, entry in
+                if !merged.contains(entry) { merged.append(entry) }
+            },
             memLimit: other.memLimit ?? memLimit,
             cpus: other.cpus ?? cpus,
             memReservation: other.memReservation ?? memReservation,
@@ -927,6 +935,11 @@ public struct ComposeService: Sendable {
         return []
     }
 
+    private static func parseStringOrList(_ value: Any?) -> [String] {
+        if let string = value as? String { return [string] }
+        return (value as? [Any])?.map { "\($0)" } ?? []
+    }
+
     // MARK: - Resource limit parsing
 
     /// Extract a string value from a YAML node (string or number).
@@ -1016,6 +1029,7 @@ extension ComposeService: Encodable {
         if !secrets.isEmpty { try c.encode(secrets, forKey: .secrets) }
         try c.encodeIfPresent(platform, forKey: .platform)
         try c.encodeIfPresent(user, forKey: .user)
+        if !tmpfs.isEmpty { try c.encode(tmpfs, forKey: .tmpfs) }
         try c.encodeIfPresent(memLimit, forKey: .memLimit)
         try c.encodeIfPresent(cpus, forKey: .cpus)
         try c.encodeIfPresent(memReservation, forKey: .memReservation)

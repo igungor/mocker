@@ -242,6 +242,16 @@ struct ContainerEngineTests {
         if let idx { #expect(args[idx + 1] == "3G") }
     }
 
+    @Test("Run arguments pass each tmpfs, options included")
+    func testRunArgumentsIncludeTmpfs() {
+        let config = ContainerConfig(image: "alpine", tmpfs: ["/code/.venv", "/run:size=64m"])
+
+        let args = ContainerEngine.buildRunArguments(name: "app", config: config)
+
+        let pairs = args.indices.dropLast().filter { args[$0] == "--tmpfs" }.map { args[$0 + 1] }
+        #expect(pairs == ["/code/.venv", "/run:size=64m"])
+    }
+
     @Test("Create arguments start with create and don't detach")
     func testCreateArgumentsDontDetach() {
         let config = ContainerConfig(image: "alpine", command: ["echo", "hi"])
