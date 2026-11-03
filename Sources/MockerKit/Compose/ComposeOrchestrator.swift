@@ -911,13 +911,22 @@ public actor ComposeOrchestrator {
         return service.networkAliases[network] ?? []
     }
 
+    nonisolated static let aliasesLabel = "com.mocker.compose.aliases"
+
+    nonisolated static func aliases(of service: String, info: ContainerInfo, composeFile: ComposeFile) -> [String] {
+        guard composeFile.services[service] == nil, let label = info.labels[aliasesLabel] else {
+            return aliases(of: service, composeFile: composeFile)
+        }
+        return label.split(separator: ",").map(String.init)
+    }
+
     nonisolated static func namedAddresses(
         of running: [(service: String, info: ContainerInfo)],
         composeFile: ComposeFile
     ) -> [(name: String, address: String)] {
         running.flatMap { service, info in
             var names = [service]
-            for alias in aliases(of: service, composeFile: composeFile) where !names.contains(alias) {
+            for alias in aliases(of: service, info: info, composeFile: composeFile) where !names.contains(alias) {
                 names.append(alias)
             }
             return names.map { (name: $0, address: info.networkAddress) }
@@ -931,20 +940,46 @@ public actor ComposeOrchestrator {
     /// `current` /etc/hosts updated to map each of `entries` and nothing else under the
     /// `managed` names. Lines that stay keep their place and new ones go at the end:
     /// the container caches the file's size for a moment, so content that moved past
-    /// the old end would be cut off from it.
+    /// the old end would be cut off from it. A real address overwrites its name's
+    /// placeholder line in place, for the same reason.
     nonisolated static func updatedHosts(
         _ current: String?,
         entries: [(name: String, address: String)],
         managed: Set<String>
     ) -> String {
         var lines = current?.split(separator: "\n").map(String.init) ?? ["127.0.0.1 localhost"]
-        let wanted = entries.map { "\($0.address) \($0.name)" }
-        lines = lines.filter { line in
-            let names = line.split(whereSeparator: \.isWhitespace).dropFirst()
-            return wanted.contains(line) || !names.contains { managed.contains(String($0)) }
+        var missing = entries.filter { entry in
+            !lines.contains { hostsFields($0) == [entry.address, entry.name] }
         }
-        lines += wanted.filter { !lines.contains($0) }
+
+        lines = lines.compactMap { line in
+            let fields = hostsFields(line)
+            let names = Array(fields.dropFirst())
+            guard names.contains(where: { managed.contains($0) }) else { return line }
+            if entries.contains(where: { fields == [$0.address, $0.name] }) { return line }
+
+            if fields.first == placeholderAddress, let i = missing.firstIndex(where: { [$0.name] == names }) {
+                return paddedHostsLine(missing.remove(at: i))
+            }
+            return nil
+        }
+
+        lines += missing.map { $0.address == placeholderAddress ? paddedHostsLine($0) : "\($0.address) \($0.name)" }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// A container's own address is known only once it runs, so its hosts file starts
+    /// with its own names on this one. Docker lists them from the first instruction, and
+    /// without them a lookup of its own name waits for DNS to time out.
+    nonisolated static let placeholderAddress = "127.0.0.1"
+
+    /// The address padded to the longest IPv4 address, so a real address fits in its place.
+    nonisolated static func paddedHostsLine(_ entry: (name: String, address: String)) -> String {
+        entry.address + String(repeating: " ", count: max(1, 16 - entry.address.count)) + entry.name
+    }
+
+    nonisolated static func hostsFields(_ line: String) -> [String] {
+        line.split(whereSeparator: \.isWhitespace).map(String.init)
     }
 
     /// Write a service's hosts file, appending when only lines were added. Never
@@ -987,13 +1022,25 @@ public actor ComposeOrchestrator {
         }
     }
 
-    /// The hosts file a new container starts with: every running service but itself.
-    private func writeHostsFileBeforeStart(_ serviceName: String, composeFile: ComposeFile) async throws -> URL {
+    private func writeHostsFileBeforeStart(
+        _ service: ComposeService,
+        containerName: String,
+        composeFile: ComposeFile
+    ) async throws -> URL {
+        let hostname = service.hostname ?? containerName
         let others = Self.namedAddresses(
-            of: try await runningServices().filter { $0.service != serviceName },
+            of: try await runningServices().filter { $0.service != service.name },
             composeFile: composeFile
-        ).sorted { $0.name < $1.name }
-        return try writeHostsFile(for: serviceName, entries: others, managed: Self.managedHostNames(composeFile), fresh: true)
+        )
+        let entries = Self.hostsEntries(
+            service: service.name,
+            hostname: hostname,
+            address: Self.placeholderAddress,
+            aliases: Self.aliases(of: service.name, composeFile: composeFile),
+            others: others
+        )
+        return try writeHostsFile(
+            for: service.name, entries: entries, managed: Self.managedHostNames(composeFile).union([hostname]), fresh: true)
     }
 
     /// Update every running container's hosts file with its own name and the others'.
@@ -1018,10 +1065,11 @@ public actor ComposeOrchestrator {
                 service: service,
                 hostname: hostname,
                 address: info.networkAddress,
-                aliases: Self.aliases(of: service, composeFile: composeFile),
+                aliases: Self.aliases(of: service, info: info, composeFile: composeFile),
                 others: others
             )
-            _ = try writeHostsFile(for: service, entries: entries, managed: Self.managedHostNames(composeFile).union([hostname]))
+            let managed = Self.managedHostNames(composeFile).union([hostname]).union(entries.map(\.name))
+            _ = try writeHostsFile(for: service, entries: entries, managed: managed)
         }
     }
 
@@ -1095,7 +1143,9 @@ public actor ComposeOrchestrator {
                 try volumeManager.composeSource($0.runtimeName(projectName: projectName))
             }
         ) + fileObjectMounts(for: service, composeFile: composeFile)
-            + [VolumeMount(source: try await writeHostsFileBeforeStart(service.name, composeFile: composeFile).path, destination: "/etc/hosts")]
+            + [VolumeMount(
+                source: try await writeHostsFileBeforeStart(service, containerName: containerName, composeFile: composeFile).path,
+                destination: "/etc/hosts")]
 
         // Docker's exec model concatenates entrypoint + command into one argv.
         // Apple's `container` CLI can only override the executable
@@ -1103,6 +1153,19 @@ public actor ComposeOrchestrator {
         // entrypoint element is used as the executable and any remaining
         // elements are spliced ahead of the command args.
         let exec = Self.resolveExec(entrypoint: service.entrypoint, command: service.command)
+
+        var labels = service.labels.merging(
+            [
+                "com.mocker.compose.project": projectName,
+                "com.mocker.compose.service": service.name,
+                "com.mocker.compose.config-hash": ComposeService.hash(of: service),
+                "com.mocker.compose.network": resolvedNetwork,
+            ]
+        ) { _, new in new }
+        let aliases = Self.aliases(of: service.name, composeFile: composeFile)
+        if !aliases.isEmpty {
+            labels[Self.aliasesLabel] = aliases.joined(separator: ",")
+        }
 
         let config = ContainerConfig(
             name: containerName,
@@ -1117,14 +1180,7 @@ public actor ComposeOrchestrator {
             // network fails inside the guest on this runtime.
             network: resolvedNetwork,
             detach: detach,
-            labels: service.labels.merging(
-                [
-                    "com.mocker.compose.project": projectName,
-                    "com.mocker.compose.service": service.name,
-                    "com.mocker.compose.config-hash": ComposeService.hash(of: service),
-                    "com.mocker.compose.network": resolvedNetwork,
-                ]
-            ) { _, new in new },
+            labels: labels,
             workingDir: service.workingDir,
             hostname: service.hostname,
             restartPolicy: service.restart.flatMap { RestartPolicy(rawValue: $0) } ?? .no,
