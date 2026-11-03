@@ -911,13 +911,22 @@ public actor ComposeOrchestrator {
         return service.networkAliases[network] ?? []
     }
 
+    nonisolated static let aliasesLabel = "com.mocker.compose.aliases"
+
+    nonisolated static func aliases(of service: String, info: ContainerInfo, composeFile: ComposeFile) -> [String] {
+        guard composeFile.services[service] == nil, let label = info.labels[aliasesLabel] else {
+            return aliases(of: service, composeFile: composeFile)
+        }
+        return label.split(separator: ",").map(String.init)
+    }
+
     nonisolated static func namedAddresses(
         of running: [(service: String, info: ContainerInfo)],
         composeFile: ComposeFile
     ) -> [(name: String, address: String)] {
         running.flatMap { service, info in
             var names = [service]
-            for alias in aliases(of: service, composeFile: composeFile) where !names.contains(alias) {
+            for alias in aliases(of: service, info: info, composeFile: composeFile) where !names.contains(alias) {
                 names.append(alias)
             }
             return names.map { (name: $0, address: info.networkAddress) }
@@ -1056,10 +1065,11 @@ public actor ComposeOrchestrator {
                 service: service,
                 hostname: hostname,
                 address: info.networkAddress,
-                aliases: Self.aliases(of: service, composeFile: composeFile),
+                aliases: Self.aliases(of: service, info: info, composeFile: composeFile),
                 others: others
             )
-            _ = try writeHostsFile(for: service, entries: entries, managed: Self.managedHostNames(composeFile).union([hostname]))
+            let managed = Self.managedHostNames(composeFile).union([hostname]).union(entries.map(\.name))
+            _ = try writeHostsFile(for: service, entries: entries, managed: managed)
         }
     }
 
@@ -1144,6 +1154,19 @@ public actor ComposeOrchestrator {
         // elements are spliced ahead of the command args.
         let exec = Self.resolveExec(entrypoint: service.entrypoint, command: service.command)
 
+        var labels = service.labels.merging(
+            [
+                "com.mocker.compose.project": projectName,
+                "com.mocker.compose.service": service.name,
+                "com.mocker.compose.config-hash": ComposeService.hash(of: service),
+                "com.mocker.compose.network": resolvedNetwork,
+            ]
+        ) { _, new in new }
+        let aliases = Self.aliases(of: service.name, composeFile: composeFile)
+        if !aliases.isEmpty {
+            labels[Self.aliasesLabel] = aliases.joined(separator: ",")
+        }
+
         let config = ContainerConfig(
             name: containerName,
             image: imageName,
@@ -1157,14 +1180,7 @@ public actor ComposeOrchestrator {
             // network fails inside the guest on this runtime.
             network: resolvedNetwork,
             detach: detach,
-            labels: service.labels.merging(
-                [
-                    "com.mocker.compose.project": projectName,
-                    "com.mocker.compose.service": service.name,
-                    "com.mocker.compose.config-hash": ComposeService.hash(of: service),
-                    "com.mocker.compose.network": resolvedNetwork,
-                ]
-            ) { _, new in new },
+            labels: labels,
             workingDir: service.workingDir,
             hostname: service.hostname,
             restartPolicy: service.restart.flatMap { RestartPolicy(rawValue: $0) } ?? .no,
