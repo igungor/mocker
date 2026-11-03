@@ -263,7 +263,6 @@ struct ComposeOrchestratorTests {
 
     @Test("A service left out of `up` keeps its aliases, which its container records")
     func hostsListAliasesOfServicesOutsideTheComposeFile() throws {
-        // `up --no-deps tool` loads only `tool`, while `ministack` keeps running.
         let toolOnly = try ComposeFile.parse("""
         services:
           tool:
@@ -277,7 +276,6 @@ struct ComposeOrchestratorTests {
         let others = ComposeOrchestrator.namedAddresses(of: [("ministack", ministack)], composeFile: toolOnly)
         #expect(others.map(\.name) == ["ministack", "bigtmp.ministack", "s3.ministack"])
 
-        // MiniStack came back at a new address: its alias lines move with it.
         let current = "127.0.0.1 localhost\n10.0.0.9 ministack\n10.0.0.9 bigtmp.ministack\n10.0.0.9 s3.ministack\n"
         let managed = ComposeOrchestrator.managedHostNames(toolOnly).union(others.map(\.name))
         let hosts = ComposeOrchestrator.updatedHosts(current, entries: others, managed: managed)
@@ -302,7 +300,6 @@ struct ComposeOrchestratorTests {
         let unlabeled = ContainerInfo(
             id: "p-db-1", name: "p-db-1", image: "mysql", state: .running, status: "Up", created: Date())
 
-        // An alias added to the compose file recreates nothing, so the file wins over the label.
         #expect(ComposeOrchestrator.aliases(of: "db", info: labeled, composeFile: compose) == ["mysql.local"])
         #expect(ComposeOrchestrator.aliases(of: "db", info: labeled, composeFile: ComposeFile()) == ["db.local"])
         #expect(ComposeOrchestrator.aliases(of: "db", info: unlabeled, composeFile: ComposeFile()) == [])

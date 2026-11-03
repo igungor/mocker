@@ -911,12 +911,8 @@ public actor ComposeOrchestrator {
         return service.networkAliases[network] ?? []
     }
 
-    /// Where a container keeps its aliases. `up` of some services loads only those, so
-    /// the aliases of the others come from their containers.
     nonisolated static let aliasesLabel = "com.mocker.compose.aliases"
 
-    /// A running container's aliases. The compose file wins, since a changed alias
-    /// recreates nothing. For a service it leaves out, the container's label tells.
     nonisolated static func aliases(of service: String, info: ContainerInfo, composeFile: ComposeFile) -> [String] {
         guard composeFile.services[service] == nil, let label = info.labels[aliasesLabel] else {
             return aliases(of: service, composeFile: composeFile)
@@ -1034,8 +1030,6 @@ public actor ComposeOrchestrator {
                 aliases: Self.aliases(of: service, info: info, composeFile: composeFile),
                 others: others
             )
-            // The names of services outside `composeFile` too, so their lines are replaced
-            // when an address changes instead of left behind with the old one.
             let managed = Self.managedHostNames(composeFile).union([hostname]).union(entries.map(\.name))
             _ = try writeHostsFile(for: service, entries: entries, managed: managed)
         }
