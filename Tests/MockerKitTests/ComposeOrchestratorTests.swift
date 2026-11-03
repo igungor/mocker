@@ -261,6 +261,53 @@ struct ComposeOrchestratorTests {
         #expect(own.map(\.name) == ["p-miniflake-1", "miniflake", "peakgames.miniflake.local"])
     }
 
+    @Test("A service left out of `up` keeps its aliases, which its container records")
+    func hostsListAliasesOfServicesOutsideTheComposeFile() throws {
+        // `up --no-deps tool` loads only `tool`, while `ministack` keeps running.
+        let toolOnly = try ComposeFile.parse("""
+        services:
+          tool:
+            image: golang
+        """)
+        let ministack = ContainerInfo(
+            id: "p-ministack-1", name: "p-ministack-1", image: "ministack", state: .running, status: "Up",
+            created: Date(), labels: [ComposeOrchestrator.aliasesLabel: "bigtmp.ministack,s3.ministack"],
+            networkAddress: "10.0.0.2")
+
+        let others = ComposeOrchestrator.namedAddresses(of: [("ministack", ministack)], composeFile: toolOnly)
+        #expect(others.map(\.name) == ["ministack", "bigtmp.ministack", "s3.ministack"])
+
+        // MiniStack came back at a new address: its alias lines move with it.
+        let current = "127.0.0.1 localhost\n10.0.0.9 ministack\n10.0.0.9 bigtmp.ministack\n10.0.0.9 s3.ministack\n"
+        let managed = ComposeOrchestrator.managedHostNames(toolOnly).union(others.map(\.name))
+        let hosts = ComposeOrchestrator.updatedHosts(current, entries: others, managed: managed)
+        #expect(hosts == "127.0.0.1 localhost\n10.0.0.2 ministack\n10.0.0.2 bigtmp.ministack\n10.0.0.2 s3.ministack\n")
+    }
+
+    @Test("The compose file names a loaded service's aliases, the label those of the others")
+    func aliasesFromComposeFileThenLabel() throws {
+        let compose = try ComposeFile.parse("""
+        services:
+          db:
+            image: mysql
+            networks:
+              default:
+                aliases: [mysql.local]
+        networks:
+          default:
+        """)
+        let labeled = ContainerInfo(
+            id: "p-db-1", name: "p-db-1", image: "mysql", state: .running, status: "Up", created: Date(),
+            labels: [ComposeOrchestrator.aliasesLabel: "db.local"])
+        let unlabeled = ContainerInfo(
+            id: "p-db-1", name: "p-db-1", image: "mysql", state: .running, status: "Up", created: Date())
+
+        // An alias added to the compose file recreates nothing, so the file wins over the label.
+        #expect(ComposeOrchestrator.aliases(of: "db", info: labeled, composeFile: compose) == ["mysql.local"])
+        #expect(ComposeOrchestrator.aliases(of: "db", info: labeled, composeFile: ComposeFile()) == ["db.local"])
+        #expect(ComposeOrchestrator.aliases(of: "db", info: unlabeled, composeFile: ComposeFile()) == [])
+    }
+
     @Test("Only the aliases of the network the service joins apply")
     func aliasesOfJoinedNetworkOnly() throws {
         let compose = try ComposeFile.parse("""
