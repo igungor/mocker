@@ -773,7 +773,8 @@ struct ComposeReplaceTests {
 
         await ComposeOrchestrator.replace(
             container(.running),
-            stop: { await calls.add("stop \($0)") },
+            timeout: nil,
+            stop: { name, _ in await calls.add("stop \(name)") },
             remove: { await calls.add("remove \($0)") }
         )
 
@@ -786,7 +787,8 @@ struct ComposeReplaceTests {
 
         await ComposeOrchestrator.replace(
             container(.stopped),
-            stop: { await calls.add("stop \($0)") },
+            timeout: nil,
+            stop: { name, _ in await calls.add("stop \(name)") },
             remove: { await calls.add("remove \($0)") }
         )
 
@@ -799,10 +801,39 @@ struct ComposeReplaceTests {
 
         await ComposeOrchestrator.replace(
             container(.running),
-            stop: { await calls.add("stop \($0)"); throw StopFailed() },
+            timeout: nil,
+            stop: { name, _ in await calls.add("stop \(name)"); throw StopFailed() },
             remove: { await calls.add("remove \($0)") }
         )
 
         #expect(await calls.log == ["stop proj-app-1", "remove proj-app-1"])
+    }
+
+    @Test("stops with up's --timeout, as Docker Compose does")
+    func stopsWithTimeout() async {
+        let calls = Calls()
+
+        await ComposeOrchestrator.replace(
+            container(.running),
+            timeout: 0,
+            stop: { await calls.add("stop \($0) \($1)") },
+            remove: { await calls.add("remove \($0)") }
+        )
+
+        #expect(await calls.log == ["stop proj-app-1 0", "remove proj-app-1"])
+    }
+
+    @Test("stops with Docker's 10s without --timeout")
+    func stopsWithDefaultTimeout() async {
+        let calls = Calls()
+
+        await ComposeOrchestrator.replace(
+            container(.running),
+            timeout: nil,
+            stop: { await calls.add("stop \($0) \($1)") },
+            remove: { await calls.add("remove \($0)") }
+        )
+
+        #expect(await calls.log == ["stop proj-app-1 10", "remove proj-app-1"])
     }
 }

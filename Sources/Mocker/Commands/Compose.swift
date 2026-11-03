@@ -316,7 +316,8 @@ struct ComposeUp: AsyncParsableCommand {
             forceRecreate: forceRecreate,
             noRecreate: noRecreate,
             wait: wait,
-            waitTimeout: waitTimeout
+            waitTimeout: waitTimeout,
+            timeout: timeout
         )
         // Total is the work actually performed, matching `down`: counting declared
         // resources instead reported `1/2` whenever a volume already existed.

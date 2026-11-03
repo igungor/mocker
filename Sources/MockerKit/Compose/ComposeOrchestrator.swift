@@ -55,6 +55,8 @@ public actor ComposeOrchestrator {
     ///   - forceRecreate: recreate every project container regardless of hash
     ///     (compose `--force-recreate`).
     ///   - noRecreate: never recreate existing project containers (compose `--no-recreate`).
+    ///   - timeout: seconds a container `up` replaces gets to exit before it is killed
+    ///     (compose `--timeout`).
     public func up(
         composeFile: ComposeFile,
         detach: Bool = false,
@@ -63,7 +65,8 @@ public actor ComposeOrchestrator {
         forceRecreate: Bool = false,
         noRecreate: Bool = false,
         wait: Bool = false,
-        waitTimeout: Int? = nil
+        waitTimeout: Int? = nil,
+        timeout: Int? = nil
     ) async throws -> [ComposeEvent] {
         var events: [ComposeEvent] = []
 
@@ -192,7 +195,8 @@ public actor ComposeOrchestrator {
                     removals[action.serviceName] = Task {
                         await Self.replace(
                             existing,
-                            stop: { [engine] in _ = try await engine.stop($0, timeout: Self.replaceStopTimeout) },
+                            timeout: timeout,
+                            stop: { [engine] in _ = try await engine.stop($0, timeout: $1) },
                             remove: { [engine] in _ = try await engine.remove($0, force: true) }
                         )
                     }
@@ -633,19 +637,20 @@ public actor ComposeOrchestrator {
         }
     }
 
-    /// Seconds a container `up` replaces gets to exit before it is killed: Docker's
-    /// default, and `compose stop`'s.
+    /// Seconds a container `up` replaces gets to exit before it is killed, unless `up`
+    /// is given `--timeout`: Docker's default, and `compose stop`'s.
     static let replaceStopTimeout = 10
 
     /// Removes the container `up` replaces as Docker Compose does: a running one is
-    /// stopped first, so it gets its stop signal and time to exit, such as to leave a
-    /// Kafka consumer group.
+    /// stopped first, so it gets its stop signal and `timeout` seconds to exit, such as
+    /// to leave a Kafka consumer group.
     nonisolated static func replace(
         _ container: ObservedContainer,
-        stop: @Sendable (String) async throws -> Void,
+        timeout: Int?,
+        stop: @Sendable (String, Int) async throws -> Void,
         remove: @Sendable (String) async throws -> Void
     ) async {
-        if container.state.isActive { try? await stop(container.name) }
+        if container.state.isActive { try? await stop(container.name, timeout ?? replaceStopTimeout) }
 
         try? await remove(container.name)
     }
