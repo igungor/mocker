@@ -311,6 +311,32 @@ struct ComposeOrchestratorTests {
         #expect(hosts == "127.0.0.1 localhost\n10.0.0.2 db\n10.9.9.9 added-by-entrypoint\n10.0.0.5 web\n")
     }
 
+    @Test("A new container finds itself before it has an address, on the placeholder")
+    func hostsOwnNamesBeforeStart() {
+        let entries = ComposeOrchestrator.hostsEntries(
+            service: "kafka", hostname: "proj-kafka-1", address: ComposeOrchestrator.placeholderAddress, others: [("db", "10.0.0.2")]
+        )
+
+        let hosts = ComposeOrchestrator.updatedHosts(nil, entries: entries, managed: ["kafka", "db", "proj-kafka-1"])
+
+        #expect(hosts == "127.0.0.1 localhost\n127.0.0.1       proj-kafka-1\n127.0.0.1       kafka\n10.0.0.2 db\n")
+    }
+
+    @Test("The real address overwrites the placeholder in place, so the file keeps its size")
+    func hostsPlaceholderReplacedInPlace() {
+        let current = "127.0.0.1 localhost\n127.0.0.1       proj-kafka-1\n127.0.0.1       kafka\n10.0.0.2 db\n"
+        let entries = ComposeOrchestrator.hostsEntries(
+            service: "kafka", hostname: "proj-kafka-1", address: "192.168.72.12", others: [("db", "10.0.0.2")]
+        )
+        let managed: Set<String> = ["kafka", "db", "proj-kafka-1"]
+
+        let hosts = ComposeOrchestrator.updatedHosts(current, entries: entries, managed: managed)
+
+        #expect(hosts == "127.0.0.1 localhost\n192.168.72.12   proj-kafka-1\n192.168.72.12   kafka\n10.0.0.2 db\n")
+        #expect(hosts.utf8.count == current.utf8.count)
+        #expect(ComposeOrchestrator.updatedHosts(hosts, entries: entries, managed: managed) == hosts)
+    }
+
     // MARK: - Entrypoint resolution (compose `entrypoint:` support)
 
     @Test("Empty entrypoint leaves command untouched")
