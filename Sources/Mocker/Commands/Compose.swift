@@ -459,6 +459,7 @@ struct ComposePS: AsyncParsableCommand {
                 services.contains { ComposeOrchestrator.belongs(c, to: $0, projectName: project) }
             }
         }
+        containers.sort { $0.name < $1.name }
 
         if quiet {
             for c in containers { print(c.id) }
@@ -474,19 +475,8 @@ struct ComposePS: AsyncParsableCommand {
             return
         }
 
-        let headers = ["Name", "Image", "Command", "Service", "Created", "Status", "Ports"]
-        let rows = containers.map { c in
-            [
-                c.name,
-                c.image,
-                c.command.isEmpty ? "" : "\"\(c.command)\"",
-                c.labels["com.mocker.compose.service"] ?? "",
-                c.createdAgo,
-                c.status,
-                c.ports.map(\.description).joined(separator: ", "),
-            ]
-        }
-        TableFormatter.print(headers: headers, rows: rows)
+        let output = try ComposePSFormat.render(format: format, entries: containers.map(ComposePSEntry.init), trunc: !noTrunc)
+        print(output, terminator: "")
     }
 }
 
