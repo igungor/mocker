@@ -475,7 +475,18 @@ struct ComposePS: AsyncParsableCommand {
             return
         }
 
-        let output = try ComposePSFormat.render(format: format, entries: containers.map(ComposePSEntry.init), trunc: !noTrunc)
+        var entries = containers.map(ComposePSEntry.init)
+        if ComposePSFormat.printsHealth(format) {
+            let statuses = await withTaskGroup(of: (Int, String).self) { group in
+                for (i, container) in containers.enumerated() {
+                    group.addTask { (i, await orchestrator.health(of: container, composeFile: composeFile)) }
+                }
+                return await group.reduce(into: [Int: String]()) { $0[$1.0] = $1.1 }
+            }
+            for (i, status) in statuses { entries[i].health = status }
+        }
+
+        let output = try ComposePSFormat.render(format: format, entries: entries, trunc: !noTrunc)
         print(output, terminator: "")
     }
 }

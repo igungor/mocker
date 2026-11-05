@@ -17,6 +17,8 @@ public struct ContainerInfo: Codable, Sendable, Identifiable {
     /// Memory limit in bytes reported by the runtime (`configuration.resources.memoryInBytes`).
     /// `nil` when the container has no explicit limit (runtime default).
     public var memoryBytes: UInt64?
+    /// Known only when mocker waited for the container to exit: the runtime doesn't report it.
+    public var exitCode: Int32?
 
     public init(
         id: String,
@@ -30,7 +32,8 @@ public struct ContainerInfo: Codable, Sendable, Identifiable {
         command: String = "",
         pid: Int? = nil,
         networkAddress: String = "",
-        memoryBytes: UInt64? = nil
+        memoryBytes: UInt64? = nil,
+        exitCode: Int32? = nil
     ) {
         self.id = id
         self.name = name
@@ -44,6 +47,7 @@ public struct ContainerInfo: Codable, Sendable, Identifiable {
         self.pid = pid
         self.networkAddress = networkAddress
         self.memoryBytes = memoryBytes
+        self.exitCode = exitCode
     }
 
     /// Short ID (first 12 characters).

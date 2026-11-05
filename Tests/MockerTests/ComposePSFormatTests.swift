@@ -126,6 +126,26 @@ struct ComposePSFormatTests {
         ])
     }
 
+    @Test("reports the exit code mocker saw, only for exited containers, as Docker does")
+    func exitCode() {
+        func entry(_ state: ContainerState, _ code: Int32?) -> ComposePSEntry {
+            ComposePSEntry(ContainerInfo(id: "c", name: "c", image: "i", state: state, status: "", created: Self.now, exitCode: code))
+        }
+
+        #expect(entry(.stopped, 2).exitCode == 2)
+        #expect(entry(.exited, nil).exitCode == 0)
+        #expect(entry(.running, 2).exitCode == 0)
+    }
+
+    @Test("runs health checks only for a format that prints health", arguments: [
+        ("json", true), ("{{.Health}}", true), ("{{json .}}", true), ("{{ json . }}", true), ("{{json . | lower}}", true),
+        ("{{.Name}}", false), ("{{json .Name}}", false), ("table", false), ("", false),
+    ])
+    func printsHealth(_ format: String, _ expected: Bool) {
+        #expect(ComposePSFormat.printsHealth(format) == expected)
+        #expect(!ComposePSFormat.printsHealth(nil))
+    }
+
     @Test("Go's tabwriter: a block's width is its widest cell plus 3, at least 10, and the last cell isn't padded")
     func tabWriter() {
         let expected = "a" + String(repeating: " ", count: 13) + "bb" + String(repeating: " ", count: 8) + "c\n"

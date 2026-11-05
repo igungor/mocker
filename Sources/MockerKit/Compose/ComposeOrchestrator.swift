@@ -847,6 +847,16 @@ public actor ComposeOrchestrator {
         }
     }
 
+    public func health(of container: ContainerInfo, composeFile: ComposeFile, now: Date = Date()) async -> String {
+        guard container.state == .running,
+              let service = container.labels["com.mocker.compose.service"],
+              let check = composeFile.services[service]?.healthcheck, !check.isDisabled
+        else { return "" }
+
+        let passed = await runHealthCheck(check, in: container.name)
+        return check.status(passed: passed, age: now.timeIntervalSince(container.created))
+    }
+
     /// Run the check's command in the container: true when it exits 0 within its timeout.
     private func runHealthCheck(_ check: HealthCheck, in containerName: String) async -> Bool {
         let process = Process()

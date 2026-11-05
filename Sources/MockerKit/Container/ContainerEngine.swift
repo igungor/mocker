@@ -196,7 +196,8 @@ public actor ContainerEngine {
             return exitCode
         }
 
-        if let finished = try? await fetchContainerInfo(id: name, name: name, config: containerConfig) {
+        if var finished = try? await fetchContainerInfo(id: name, name: name, config: containerConfig) {
+            finished.exitCode = exitCode
             try await store.save(finished)
         }
         return exitCode
@@ -271,7 +272,8 @@ public actor ContainerEngine {
         relay.cancel()
 
         // Not there when the runtime removed it (`--rm`) or never created it.
-        if !containerConfig.rm, let finished = await inspectRuntime(name: name, config: containerConfig) {
+        if !containerConfig.rm, var finished = await inspectRuntime(name: name, config: containerConfig) {
+            finished.exitCode = exitCode
             try await store.save(finished)
         } else {
             try await store.delete(name)
