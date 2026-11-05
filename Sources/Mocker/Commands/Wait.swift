@@ -24,8 +24,7 @@ struct Wait: AsyncParsableCommand {
                     throw MockerError.containerNotFound(identifier)
                 }
                 if container.state != .running {
-                    // Docker outputs just the exit code
-                    print("0")
+                    print(container.exitCode ?? 0)
                     break
                 }
                 try await Task.sleep(nanoseconds: 500_000_000) // 0.5s

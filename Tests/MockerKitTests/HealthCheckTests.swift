@@ -153,4 +153,16 @@ struct HealthCheckTests {
         #expect(outcome == .unhealthy)
         #expect(await probes.count == 4)
     }
+
+    @Test("one probe gives Docker's status: starting until Docker would have counted the retries")
+    func status() {
+        var check = HealthCheck(command: ["true"])
+        check.interval = 1
+        check.retries = 3
+        check.startPeriod = 5
+
+        #expect(check.status(passed: true, age: 0) == "healthy")
+        #expect(check.status(passed: false, age: 7.9) == "starting")
+        #expect(check.status(passed: false, age: 8) == "unhealthy")
+    }
 }

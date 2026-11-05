@@ -59,6 +59,13 @@ public struct HealthCheck: Sendable, Equatable {
         return covered == (text as NSString).length ? seconds : nil
     }
 
+    /// Docker's health status from one probe, since mocker keeps none between commands:
+    /// `starting` until Docker would have counted `retries` failures after the start period.
+    public func status(passed: Bool, age: TimeInterval) -> String {
+        if passed { return "healthy" }
+        return age < startPeriod + interval * Double(retries) ? "starting" : "unhealthy"
+    }
+
     enum Outcome: Equatable {
         case healthy, unhealthy, exited
     }

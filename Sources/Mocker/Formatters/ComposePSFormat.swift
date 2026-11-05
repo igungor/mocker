@@ -53,6 +53,12 @@ enum ComposePSFormat {
         return TabWriter.format(header + "\n" + body)
     }
 
+    static func printsHealth(_ format: String?) -> Bool {
+        guard let format else { return false }
+        return format == "json" || format.contains("Health")
+            || format.range(of: #"json\s+\.\s*(\||-?\}\})"#, options: .regularExpression) != nil
+    }
+
     /// Docker's `Format.templateString`.
     static func templateString(_ format: String) -> String {
         switch format {
@@ -142,6 +148,9 @@ struct ComposePSEntry: Sendable {
             publishers: publishers,
             labels: container.labels
         )
+        if state == "exited" || state == "dead" {
+            exitCode = Int(container.exitCode ?? 0)
+        }
     }
 }
 
