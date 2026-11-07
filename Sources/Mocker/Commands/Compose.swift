@@ -66,15 +66,22 @@ struct ComposeOptions: ParsableArguments {
     }
 }
 
-/// The shared compose flags for `logs`, where `-f` is `--follow`, as in Docker, so the
-/// file flag has no short name. `ComposeArgNormalizer` passes a `-f FILE` written
-/// before `logs` on as `--file FILE`.
-struct ComposeLogsOptions: ParsableArguments {
+/// The shared compose flags for the subcommands whose own `-f` is something else, as in
+/// Docker: `logs -f` is `--follow` and `rm -f` is `--force`. Their file flag has no short
+/// name, and `ComposeArgNormalizer` passes a `-f FILE` written before them on as
+/// `--file FILE`.
+@dynamicMemberLookup
+struct ComposeLongFileOptions: ParsableArguments {
     @Option(name: [.long, .customLong("file")], parsing: .singleValue,
             help: "Compose file path (repeatable; later files override earlier)")
     var files: [String] = []
 
     @OptionGroup var project: ComposeProjectOptions
+
+    subscript<Value>(dynamicMember keyPath: WritableKeyPath<ComposeProjectOptions, Value>) -> Value {
+        get { project[keyPath: keyPath] }
+        set { project[keyPath: keyPath] = newValue }
+    }
 
     func loadCompose(targets: [String] = []) throws -> (ComposeFile, projectName: String, projectDir: URL) {
         try project.loadCompose(files: files, targets: targets)
@@ -526,7 +533,7 @@ struct ComposeLogs: AsyncParsableCommand {
         abstract: "View output from containers"
     )
 
-    @OptionGroup var options: ComposeLogsOptions
+    @OptionGroup var options: ComposeLongFileOptions
 
     @Argument(help: "Services to show (shows all if omitted)")
     var services: [String] = []
@@ -1267,9 +1274,9 @@ struct ComposeRm: AsyncParsableCommand {
         abstract: "Remove stopped service containers"
     )
 
-    @OptionGroup var options: ComposeOptions
+    @OptionGroup var options: ComposeLongFileOptions
 
-    @Flag(name: .long, help: "Don't ask to confirm removal")
+    @Flag(name: .shortAndLong, help: "Don't ask to confirm removal")
     var force = false
 
     @Flag(name: [.customShort("s"), .customLong("stop")], help: "Stop the containers, if required, before removing")
@@ -1320,11 +1327,25 @@ struct ComposeRm: AsyncParsableCommand {
             ? containers
             : containers.filter { c in services.contains { ComposeOrchestrator.belongs(c, to: $0, projectName: project) } }
 
-        for c in targets {
+        let removable = Self.removable(targets, stop: stopBeforeRemove)
+        guard !removable.isEmpty else {
+            FileHandle.standardError.write(Data("No stopped containers\n".utf8))
+            return
+        }
+
+        for c in removable {
             if stopBeforeRemove { _ = try? await engine.stop(c.id) }
             _ = try? await engine.remove(c.id, force: force)
             print("Container \(c.name)  Removed")
         }
+    }
+
+    /// The containers `rm` removes. Docker's `rm` leaves running containers, paused ones
+    /// included, unless `--stop` stops them first, and `--force` only skips its prompt.
+    static func removable(_ containers: [ContainerInfo], stop: Bool) -> [ContainerInfo] {
+        guard !stop else { return containers }
+
+        return containers.filter { $0.state != .running && $0.state != .paused }
     }
 }
 

@@ -24,8 +24,9 @@ enum ComposeArgNormalizer {
     private static let boolFlags: Set<String> = ["--dry-run"]
 
     /// Subcommands whose own `-f` isn't the file flag, as in Docker: `logs -f` is
-    /// `--follow`. A `-f` written before one of them moves after it as `--file`.
-    private static let ownShortF: Set<String> = ["logs"]
+    /// `--follow` and `rm -f` is `--force`. A `-f` written before one of them moves
+    /// after it as `--file`.
+    private static let ownShortF: Set<String> = ["logs", "rm"]
 
     static func reorder(_ args: [String]) -> [String] {
         guard args.first == "compose" else { return args }
