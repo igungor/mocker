@@ -499,8 +499,8 @@ struct ComposeLogs: AsyncParsableCommand {
 
     @OptionGroup var options: ComposeOptions
 
-    @Argument(help: "Service name (shows all if omitted)")
-    var service: String?
+    @Argument(help: "Services to show (shows all if omitted)")
+    var services: [String] = []
 
     @Flag(name: .long, help: "Follow log output")
     var follow = false
@@ -527,9 +527,9 @@ struct ComposeLogs: AsyncParsableCommand {
     var until: String?
 
     func run() async throws {
-        let (composeFile, project, projectDir) = try options.loadCompose(targets: service.map { [$0] } ?? [])
+        let (composeFile, project, projectDir) = try options.loadCompose(targets: services)
         let config = MockerConfig()
-        if let service { try composeFile.validateServiceNames([service]) }
+        try composeFile.validateServiceNames(services)
         let engine = try ContainerEngine(config: config)
         let imageManager = try ImageManager(config: config)
         let networkManager = try NetworkManager(config: config)
@@ -545,12 +545,9 @@ struct ComposeLogs: AsyncParsableCommand {
         )
 
         let containers = try await orchestrator.ps()
-        let targets: [ContainerInfo]
-        if let service {
-            targets = containers.filter { ComposeOrchestrator.belongs($0, to: service, projectName: project) }
-        } else {
-            targets = containers
-        }
+        let targets = services.isEmpty
+            ? containers
+            : containers.filter { c in services.contains { ComposeOrchestrator.belongs(c, to: $0, projectName: project) } }
 
         StreamedProcesses.stopOnSignal()
         let tailLines = try ContainerEngine.tailLines(tail)

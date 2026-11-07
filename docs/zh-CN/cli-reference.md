@@ -738,7 +738,7 @@ mocker compose [选项] ps
 查看容器输出。
 
 ```
-mocker compose [选项] logs [--follow] [服务名]
+mocker compose [选项] logs [--follow] [服务名...]
 ```
 
 **选项：**

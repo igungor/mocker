@@ -67,6 +67,13 @@ struct CLITests {
         #expect(command.detach == true)
     }
 
+    @Test("Compose logs takes several services, as Docker does")
+    func composeLogsServices() throws {
+        let command = try ComposeLogs.parse(["--tail", "30", "mysql", "ministack"])
+        #expect(command.services == ["mysql", "ministack"])
+        #expect(command.tail == "30")
+    }
+
     @Test("Compose subcommand accepts --project-directory flag")
     func composeProjectDirectoryFlag() throws {
         let command = try ComposePull.parse(["--project-directory", "/tmp/myproj", "-f", "a.yaml"])
