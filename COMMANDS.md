@@ -990,7 +990,7 @@ mocker compose ps [OPTIONS]
 View output from containers.
 
 ```
-mocker compose logs [OPTIONS] [SERVICE]
+mocker compose logs [OPTIONS] [SERVICE...]
 ```
 
 | Flag | Short | Description |

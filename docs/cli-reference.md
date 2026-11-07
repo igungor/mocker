@@ -590,7 +590,7 @@ mocker compose [OPTIONS] ps
 View output from containers.
 
 ```bash
-mocker compose [OPTIONS] logs [--follow] [SERVICE]
+mocker compose [OPTIONS] logs [--follow] [SERVICE...]
 ```
 
 **Flags:**
@@ -602,6 +602,7 @@ mocker compose [OPTIONS] logs [--follow] [SERVICE]
 ```bash
 mocker compose logs
 mocker compose logs api
+mocker compose logs api db
 mocker compose logs --follow api
 ```
 
