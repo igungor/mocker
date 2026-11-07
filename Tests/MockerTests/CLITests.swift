@@ -84,7 +84,7 @@ struct CLITests {
     func composeLogsFollowShort() throws {
         let command = try ComposeLogs.parse(["-f", "web"])
         #expect(command.follow)
-        #expect(command.service == "web")
+        #expect(command.services == ["web"])
         #expect(command.options.files.isEmpty)
 
         let combined = try ComposeLogs.parse(["--file", "a.yaml", "-ft", "web"])
@@ -103,7 +103,7 @@ struct CLITests {
         let follow = try parse(["compose", "-f", "a.yaml", "logs", "-f", "web"])
         #expect(follow.options.files == ["a.yaml"])
         #expect(follow.follow)
-        #expect(follow.service == "web")
+        #expect(follow.services == ["web"])
 
         let printed = try parse(["compose", "-f=a.yaml", "--file", "b.yaml", "logs", "web"])
         #expect(printed.options.files == ["a.yaml", "b.yaml"])
