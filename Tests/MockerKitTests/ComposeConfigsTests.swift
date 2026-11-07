@@ -72,7 +72,7 @@ struct ComposeConfigsTests {
         #expect(file.configs["unset"]?.content == nil)
     }
 
-    @Test("Later files add configs and replace a service's list")
+    @Test("Later files add configs and add to a service's list")
     func merge() throws {
         let base = try ComposeFile.parse("""
         services:
@@ -95,7 +95,7 @@ struct ComposeConfigsTests {
         let merged = ComposeFile.merge([base, overlay])
 
         #expect(merged.configs.keys.sorted() == ["a", "b"])
-        #expect(merged.services["app"]?.configs == [ComposeFileReference(source: "b")])
+        #expect(merged.services["app"]?.configs == [ComposeFileReference(source: "a"), ComposeFileReference(source: "b")])
     }
 
     @Test("A config list change changes the service hash")

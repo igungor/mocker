@@ -3,26 +3,77 @@ import Foundation
 /// A service's `healthcheck:`. `compose up` runs it with `container exec` while a
 /// dependent service waits for it with `depends_on` `condition: service_healthy`.
 public struct HealthCheck: Sendable, Equatable {
+    // What the file sets, nil where it leaves a key out: a later file overrides only the
+    // keys it sets, as compose-go merges a healthcheck as a mapping.
+    var test: [String]?
+    var disable: Bool?
+    var declaredInterval: TimeInterval?
+    var declaredTimeout: TimeInterval?
+    var declaredRetries: Int?
+    var declaredStartPeriod: TimeInterval?
+
+    init(
+        command: [String]?,
+        interval: TimeInterval? = nil,
+        timeout: TimeInterval? = nil,
+        retries: Int? = nil,
+        startPeriod: TimeInterval? = nil
+    ) {
+        test = command
+        declaredInterval = interval
+        declaredTimeout = timeout
+        declaredRetries = retries
+        declaredStartPeriod = startPeriod
+    }
+
     /// The command to run, in exec form. Empty when the check is disabled.
-    public var command: [String]
-    public var interval: TimeInterval = 30
-    public var timeout: TimeInterval = 30
-    public var retries: Int = 3
-    public var startPeriod: TimeInterval = 0
+    public var command: [String] { disable == true ? [] : test ?? [] }
+
+    // Docker's defaults where the files leave a key out.
+    public var interval: TimeInterval {
+        get { declaredInterval ?? 30 }
+        set { declaredInterval = newValue }
+    }
+    public var timeout: TimeInterval {
+        get { declaredTimeout ?? 30 }
+        set { declaredTimeout = newValue }
+    }
+    public var retries: Int {
+        get { declaredRetries ?? 3 }
+        set { declaredRetries = newValue }
+    }
+    public var startPeriod: TimeInterval {
+        get { declaredStartPeriod ?? 0 }
+        set { declaredStartPeriod = newValue }
+    }
 
     public var isDisabled: Bool { command.isEmpty }
 
-    /// Parse a `healthcheck:` mapping. Unset fields keep Docker's defaults.
+    /// Parse a `healthcheck:` mapping.
     static func parse(_ value: Any?) -> HealthCheck? {
         guard let dict = value as? [String: Any] else { return nil }
-        if dict["disable"] as? Bool == true { return HealthCheck(command: []) }
 
-        var check = HealthCheck(command: command(from: dict["test"]))
-        if let interval = duration(dict["interval"]) { check.interval = interval }
-        if let timeout = duration(dict["timeout"]) { check.timeout = timeout }
-        if let retries = dict["retries"] as? Int, retries > 0 { check.retries = retries }
-        if let startPeriod = duration(dict["start_period"]) { check.startPeriod = startPeriod }
+        var check = HealthCheck(
+            command: dict["test"].map { Self.command(from: $0) },
+            interval: duration(dict["interval"]),
+            timeout: duration(dict["timeout"]),
+            retries: (dict["retries"] as? Int).flatMap { $0 > 0 ? $0 : nil },
+            startPeriod: duration(dict["start_period"])
+        )
+        check.disable = dict["disable"] as? Bool
         return check
+    }
+
+    func merged(with other: HealthCheck) -> HealthCheck {
+        var merged = HealthCheck(
+            command: other.test ?? test,
+            interval: other.declaredInterval ?? declaredInterval,
+            timeout: other.declaredTimeout ?? declaredTimeout,
+            retries: other.declaredRetries ?? declaredRetries,
+            startPeriod: other.declaredStartPeriod ?? declaredStartPeriod
+        )
+        merged.disable = other.disable ?? disable
+        return merged
     }
 
     /// `test:` in exec form: `[CMD, args...]` runs as is, `[CMD-SHELL, command]` and a
