@@ -1327,14 +1327,27 @@ struct ComposeRm: AsyncParsableCommand {
             ? containers
             : containers.filter { c in services.contains { ComposeOrchestrator.belongs(c, to: $0, projectName: project) } }
 
+        // Docker stops the containers before it asks, so a "no" leaves them stopped.
+        if stopBeforeRemove {
+            for c in targets { _ = try? await engine.stop(c.id) }
+        }
+
         let removable = Self.removable(targets, stop: stopBeforeRemove)
         guard !removable.isEmpty else {
             FileHandle.standardError.write(Data("No stopped containers\n".utf8))
             return
         }
 
+        let message = "Going to remove " + removable.map(\.name).joined(separator: ", ")
+        if force {
+            print(message)
+        } else {
+            print(message + " [y/N]: ", terminator: "")
+            fflush(stdout)
+            guard Self.confirmed(readLine()) else { return }
+        }
+
         for c in removable {
-            if stopBeforeRemove { _ = try? await engine.stop(c.id) }
             _ = try? await engine.remove(c.id, force: force)
             print("Container \(c.name)  Removed")
         }
@@ -1346,6 +1359,12 @@ struct ComposeRm: AsyncParsableCommand {
         guard !stop else { return containers }
 
         return containers.filter { $0.state != .running && $0.state != .paused }
+    }
+
+    static func confirmed(_ answer: String?) -> Bool {
+        guard let answer else { return false }
+
+        return ["y", "yes"].contains(answer.trimmingCharacters(in: .whitespaces).lowercased())
     }
 }
 

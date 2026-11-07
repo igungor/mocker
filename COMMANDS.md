@@ -1175,7 +1175,8 @@ mocker compose rm [OPTIONS] [SERVICE...]
 | `--volumes` | `-v` | No effect: mocker does not create anonymous volumes, so there is nothing to remove. Warns rather than reporting a cleanup it did not do |
 | `--dry-run` | | Execute command in dry run mode |
 
-As in Docker, `rm` leaves running containers unless `--stop` stops them first. After `rm`,
+As in Docker, `rm` leaves running containers unless `--stop` stops them first, and asks
+before it removes anything unless `--force` is given. After `rm`,
 `-f` is `--force`. Put `-f FILE` before `rm`, or use `--file FILE`:
 `mocker compose -f staging.yml rm -sf api`.
 

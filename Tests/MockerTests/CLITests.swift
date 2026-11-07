@@ -137,6 +137,15 @@ struct CLITests {
         #expect(ComposeRm.removable(containers, stop: true).map(\.id) == ["running", "paused", "exited", "created"])
     }
 
+    @Test("Compose rm removes only on a yes, as Docker does")
+    func composeRmConfirmed() {
+        #expect(ComposeRm.confirmed("y"))
+        #expect(ComposeRm.confirmed(" YES "))
+        #expect(!ComposeRm.confirmed(""))
+        #expect(!ComposeRm.confirmed("n"))
+        #expect(!ComposeRm.confirmed(nil))
+    }
+
     @Test("Compose up parses --force-recreate")
     func composeUpForceRecreateFlag() throws {
         let command = try ComposeUp.parse(["-d", "--force-recreate"])
