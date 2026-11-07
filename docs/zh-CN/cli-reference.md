@@ -743,9 +743,11 @@ mocker compose [选项] logs [--follow] [服务名]
 
 **选项：**
 
-| 参数 | 说明 |
-|------|------|
-| `--follow` | 持续跟踪日志（无 `-f` 简写，避免与 `--file` 冲突） |
+| 参数 | 简写 | 说明 |
+|------|------|------|
+| `--follow` | `-f` | 持续跟踪日志 |
+
+与 Docker 一致，`logs` 之后的 `-f` 即 `--follow`。指定 Compose 文件时，把 `-f 文件` 写在 `logs` 之前，或使用 `--file 文件`。
 
 ```bash
 # 所有服务的日志
@@ -756,6 +758,9 @@ mocker compose logs api
 
 # 持续跟踪
 mocker compose logs --follow api
+
+# 指定 Compose 文件并持续跟踪
+mocker compose -f staging.yml logs -f api
 ```
 
 ---

@@ -73,6 +73,43 @@ struct CLITests {
         #expect(command.options.projectDirectory == "/tmp/myproj")
     }
 
+    @Test("Compose logs reads -f as --follow, as Docker does")
+    func composeLogsFollowShort() throws {
+        let command = try ComposeLogs.parse(["-f", "web"])
+        #expect(command.follow)
+        #expect(command.service == "web")
+        #expect(command.options.files.isEmpty)
+
+        let combined = try ComposeLogs.parse(["--file", "a.yaml", "-ft", "web"])
+        #expect(combined.options.files == ["a.yaml"])
+        #expect(combined.follow)
+        #expect(combined.timestamps)
+    }
+
+    @Test("Compose -f FILE before logs is the file, and -f after it follows")
+    func composeLogsFileBeforeFollowAfter() throws {
+        func parse(_ args: [String]) throws -> ComposeLogs {
+            let command = try MockerCLI.parseAsRoot(ComposeArgNormalizer.reorder(args))
+            return try #require(command as? ComposeLogs)
+        }
+
+        let follow = try parse(["compose", "-f", "a.yaml", "logs", "-f", "web"])
+        #expect(follow.options.files == ["a.yaml"])
+        #expect(follow.follow)
+        #expect(follow.service == "web")
+
+        let printed = try parse(["compose", "-f=a.yaml", "--file", "b.yaml", "logs", "web"])
+        #expect(printed.options.files == ["a.yaml", "b.yaml"])
+        #expect(!printed.follow)
+    }
+
+    @Test("Compose -f after any subcommand but logs is still the file")
+    func composeFileAfterOtherSubcommand() throws {
+        let argv = ComposeArgNormalizer.reorder(["compose", "-f", "a.yaml", "pull", "-f", "b.yaml"])
+        let command = try #require(try MockerCLI.parseAsRoot(argv) as? ComposePull)
+        #expect(command.options.files == ["a.yaml", "b.yaml"])
+    }
+
     @Test("Compose up parses --force-recreate")
     func composeUpForceRecreateFlag() throws {
         let command = try ComposeUp.parse(["-d", "--force-recreate"])

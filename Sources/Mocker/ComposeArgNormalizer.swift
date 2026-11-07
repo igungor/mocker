@@ -23,6 +23,10 @@ enum ComposeArgNormalizer {
     /// Valueless global flags Docker also accepts before the subcommand.
     private static let boolFlags: Set<String> = ["--dry-run"]
 
+    /// Subcommands whose own `-f` isn't the file flag, as in Docker: `logs -f` is
+    /// `--follow`. A `-f` written before one of them moves after it as `--file`.
+    private static let ownShortF: Set<String> = ["logs"]
+
     static func reorder(_ args: [String]) -> [String] {
         guard args.first == "compose" else { return args }
 
@@ -77,6 +81,10 @@ enum ComposeArgNormalizer {
         // args untouched so ArgumentParser produces its normal help/usage output.
         guard let subIdx = subcommandIndex else { return args }
 
+        if ownShortF.contains(args[subIdx]) {
+            relocated = relocated.map(longFileFlag)
+        }
+
         var result: [String] = ["compose"]
         result.append(contentsOf: leading)
         result.append(args[subIdx])
@@ -85,5 +93,11 @@ enum ComposeArgNormalizer {
             result.append(contentsOf: args[(subIdx + 1)...])
         }
         return result
+    }
+
+    private static func longFileFlag(_ token: String) -> String {
+        if token == "-f" { return "--file" }
+        if token.hasPrefix("-f=") { return "--file=" + token.dropFirst(3) }
+        return token
     }
 }
