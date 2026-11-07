@@ -84,7 +84,7 @@ struct CLITests {
     func composeLogsFollowShort() throws {
         let command = try ComposeLogs.parse(["-f", "web"])
         #expect(command.follow)
-        #expect(command.service == "web")
+        #expect(command.services == ["web"])
         #expect(command.options.files.isEmpty)
 
         let combined = try ComposeLogs.parse(["--file", "a.yaml", "-ft", "web"])
@@ -103,7 +103,7 @@ struct CLITests {
         let follow = try parse(["compose", "-f", "a.yaml", "logs", "-f", "web"])
         #expect(follow.options.files == ["a.yaml"])
         #expect(follow.follow)
-        #expect(follow.service == "web")
+        #expect(follow.services == ["web"])
 
         let printed = try parse(["compose", "-f=a.yaml", "--file", "b.yaml", "logs", "web"])
         #expect(printed.options.files == ["a.yaml", "b.yaml"])
@@ -115,6 +115,35 @@ struct CLITests {
         let argv = ComposeArgNormalizer.reorder(["compose", "-f", "a.yaml", "pull", "-f", "b.yaml"])
         let command = try #require(try MockerCLI.parseAsRoot(argv) as? ComposePull)
         #expect(command.options.files == ["a.yaml", "b.yaml"])
+    }
+
+    @Test("Compose rm reads -f as --force, as Docker does")
+    func composeRmForceShort() throws {
+        let argv = ComposeArgNormalizer.reorder(["compose", "-f", "a.yaml", "rm", "-sf", "web"])
+        let command = try #require(try MockerCLI.parseAsRoot(argv) as? ComposeRm)
+        #expect(command.options.files == ["a.yaml"])
+        #expect(command.force)
+        #expect(command.stopBeforeRemove)
+        #expect(command.services == ["web"])
+    }
+
+    @Test("Compose rm leaves running and paused containers unless --stop, as Docker does")
+    func composeRmRemovable() {
+        let containers = [ContainerState.running, .paused, .exited, .created].map { state in
+            ContainerInfo(id: state.rawValue, name: state.rawValue, image: "alpine", state: state, status: "", created: Date())
+        }
+
+        #expect(ComposeRm.removable(containers, stop: false).map(\.id) == ["exited", "created"])
+        #expect(ComposeRm.removable(containers, stop: true).map(\.id) == ["running", "paused", "exited", "created"])
+    }
+
+    @Test("Compose rm removes only on a yes, as Docker does")
+    func composeRmConfirmed() {
+        #expect(ComposeRm.confirmed("y"))
+        #expect(ComposeRm.confirmed(" YES "))
+        #expect(!ComposeRm.confirmed(""))
+        #expect(!ComposeRm.confirmed("n"))
+        #expect(!ComposeRm.confirmed(nil))
     }
 
     @Test("Compose up parses --force-recreate")
