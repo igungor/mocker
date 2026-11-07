@@ -48,11 +48,40 @@ struct ComposeCommand: AsyncParsableCommand {
 
 // MARK: - Shared Options
 
+@dynamicMemberLookup
 struct ComposeOptions: ParsableArguments {
     @Option(name: [.customShort("f"), .long, .customLong("file")], parsing: .singleValue,
             help: "Compose file path (repeatable; later files override earlier)")
     var files: [String] = []
 
+    @OptionGroup var project: ComposeProjectOptions
+
+    subscript<Value>(dynamicMember keyPath: WritableKeyPath<ComposeProjectOptions, Value>) -> Value {
+        get { project[keyPath: keyPath] }
+        set { project[keyPath: keyPath] = newValue }
+    }
+
+    func loadCompose(targets: [String] = [], applyProfiles: Bool = true) throws -> (ComposeFile, projectName: String, projectDir: URL) {
+        try project.loadCompose(files: files, targets: targets, applyProfiles: applyProfiles)
+    }
+}
+
+/// The shared compose flags for `logs`, where `-f` is `--follow`, as in Docker, so the
+/// file flag has no short name. `ComposeArgNormalizer` passes a `-f FILE` written
+/// before `logs` on as `--file FILE`.
+struct ComposeLogsOptions: ParsableArguments {
+    @Option(name: [.long, .customLong("file")], parsing: .singleValue,
+            help: "Compose file path (repeatable; later files override earlier)")
+    var files: [String] = []
+
+    @OptionGroup var project: ComposeProjectOptions
+
+    func loadCompose(targets: [String] = []) throws -> (ComposeFile, projectName: String, projectDir: URL) {
+        try project.loadCompose(files: files, targets: targets)
+    }
+}
+
+struct ComposeProjectOptions: ParsableArguments {
     @Option(name: [.customShort("p"), .customLong("project-name")], help: "Project name")
     var projectName: String?
 
@@ -70,7 +99,7 @@ struct ComposeOptions: ParsableArguments {
     /// - Parameters:
     ///   - targets: the services the command names; they activate their own profiles.
     ///   - applyProfiles: false to keep every service, whatever its profiles.
-    func loadCompose(targets: [String] = [], applyProfiles: Bool = true) throws -> (ComposeFile, projectName: String, projectDir: URL) {
+    func loadCompose(files: [String], targets: [String] = [], applyProfiles: Bool = true) throws -> (ComposeFile, projectName: String, projectDir: URL) {
         let cwd = FileManager.default.currentDirectoryPath
         let projectDir = ComposeFile.resolveProjectDirectory(
             explicit: projectDirectory, files: files, cwd: cwd
@@ -497,12 +526,12 @@ struct ComposeLogs: AsyncParsableCommand {
         abstract: "View output from containers"
     )
 
-    @OptionGroup var options: ComposeOptions
+    @OptionGroup var options: ComposeLogsOptions
 
     @Argument(help: "Services to show (shows all if omitted)")
     var services: [String] = []
 
-    @Flag(name: .long, help: "Follow log output")
+    @Flag(name: .shortAndLong, help: "Follow log output")
     var follow = false
 
     @Option(name: .long, help: "Show logs for a specific container index")

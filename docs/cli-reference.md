@@ -595,8 +595,11 @@ mocker compose [OPTIONS] logs [--follow] [SERVICE...]
 
 **Flags:**
 ```
---follow   Follow log output
+-f, --follow   Follow log output
 ```
+
+After `logs`, `-f` is `--follow`, as in Docker. Put `-f FILE` before `logs`, or use
+`--file FILE`.
 
 **Examples:**
 ```bash
@@ -604,6 +607,7 @@ mocker compose logs
 mocker compose logs api
 mocker compose logs api db
 mocker compose logs --follow api
+mocker compose -f staging.yml logs -f api
 ```
 
 ---

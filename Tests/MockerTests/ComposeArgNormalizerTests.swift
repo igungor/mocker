@@ -71,4 +71,16 @@ struct ComposeArgNormalizerTests {
         let out = ComposeArgNormalizer.reorder(["compose", "-f", "a.yaml", "--dry-run", "build"])
         #expect(out == ["compose", "build", "-f", "a.yaml", "--dry-run"])
     }
+
+    @Test("Passes -f before logs on as --file, since logs reads -f as --follow")
+    func fileBeforeLogs() {
+        let out = ComposeArgNormalizer.reorder(["compose", "-f", "a.yaml", "-f=b.yaml", "-p", "proj", "logs", "-f", "web"])
+        #expect(out == ["compose", "logs", "--file", "a.yaml", "--file=b.yaml", "-p", "proj", "-f", "web"])
+    }
+
+    @Test("Leaves --file before logs as it is")
+    func longFileBeforeLogs() {
+        let out = ComposeArgNormalizer.reorder(["compose", "--file", "a.yaml", "logs", "--follow"])
+        #expect(out == ["compose", "logs", "--file", "a.yaml", "--follow"])
+    }
 }

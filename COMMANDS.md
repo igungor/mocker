@@ -995,7 +995,7 @@ mocker compose logs [OPTIONS] [SERVICE...]
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `--follow` | | Follow log output |
+| `--follow` | `-f` | Follow log output |
 | `--dry-run` | | Execute command in dry run mode |
 | `--index` | | Show logs for a specific container index |
 | `--no-color` | | Produce monochrome output |
@@ -1004,6 +1004,9 @@ mocker compose logs [OPTIONS] [SERVICE...]
 | `--tail` | `-n` | Number of lines to show from the end |
 | `--timestamps` | `-t` | Show timestamps |
 | `--until` | | Show logs before a timestamp |
+
+After `logs`, `-f` is `--follow`, as in Docker. Put `-f FILE` before `logs`, or use
+`--file FILE`: `mocker compose -f staging.yml logs -f api`.
 
 ### `mocker compose build`
 
