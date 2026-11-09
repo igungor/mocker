@@ -63,7 +63,7 @@ struct ComposeSecretsTests {
         #expect(file.secrets["key"]?.file == dir.appendingPathComponent("sub/key.pem").standardized.path)
     }
 
-    @Test("Later files add secrets and replace a service's list; the list is in the hash")
+    @Test("Later files add secrets and add to a service's list; the list is in the hash")
     func mergeAndHash() throws {
         let base = try ComposeFile.parse("services:\n  app:\n    image: alpine\n    secrets: [a]\nsecrets:\n  a:\n    file: a\n")
         let overlay = try ComposeFile.parse("services:\n  app:\n    secrets: [b]\nsecrets:\n  b:\n    file: b\n")
@@ -71,7 +71,7 @@ struct ComposeSecretsTests {
         let merged = ComposeFile.merge([base, overlay])
 
         #expect(merged.secrets.keys.sorted() == ["a", "b"])
-        #expect(merged.services["app"]?.secrets == [ComposeFileReference(source: "b")])
+        #expect(merged.services["app"]?.secrets == [ComposeFileReference(source: "a"), ComposeFileReference(source: "b")])
 
         let app = try #require(merged.services["app"])
         var without = app

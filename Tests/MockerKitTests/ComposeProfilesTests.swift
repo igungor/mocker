@@ -57,11 +57,11 @@ struct ComposeProfilesTests {
         #expect(ComposeFile.activeProfiles(flags: [], projectDir: dir, environment: [:]) == ["fromdotenv"])
     }
 
-    @Test("A later file's profiles replace the earlier ones")
+    @Test("A later file's profiles are added to the earlier ones")
     func mergeProfiles() throws {
         let base = try ComposeFile.parse("services:\n  tool:\n    image: alpine\n    profiles: [a]\n")
         let overlay = try ComposeFile.parse("services:\n  tool:\n    profiles: [b]\n")
 
-        #expect(ComposeFile.merge([base, overlay]).services["tool"]?.profiles == ["b"])
+        #expect(ComposeFile.merge([base, overlay]).services["tool"]?.profiles == ["a", "b"])
     }
 }

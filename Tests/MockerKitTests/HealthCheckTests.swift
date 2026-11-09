@@ -46,7 +46,8 @@ struct HealthCheckTests {
         """)
 
         let db = try #require(compose.services["db"]?.healthcheck)
-        #expect(db == HealthCheck(command: ["mysqladmin", "ping"], interval: 1, timeout: 30, retries: 120, startPeriod: 0))
+        #expect(db == HealthCheck(command: ["mysqladmin", "ping"], interval: 1, retries: 120))
+        #expect(db.timeout == 30 && db.startPeriod == 0)
         #expect(compose.services["cache"]?.healthcheck?.isDisabled == true)
         #expect(compose.services["app"]?.dependsOnConditions == ["db": "service_healthy", "cache": "service_started"])
         #expect(compose.services["app"]?.healthcheck == nil)

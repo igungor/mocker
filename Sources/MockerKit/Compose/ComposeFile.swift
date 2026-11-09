@@ -707,7 +707,7 @@ public struct ComposeService: Sendable {
                 build = ComposeBuild(context: buildStr)
             } else if let buildDict = buildVal as? [String: Any] {
                 build = ComposeBuild(
-                    context: buildDict["context"] as? String ?? ".",
+                    context: buildDict["context"] as? String,
                     dockerfile: buildDict["dockerfile"] as? String,
                     target: buildDict["target"] as? String,
                     args: parseBuildArgs(buildDict["args"])
@@ -792,38 +792,35 @@ public struct ComposeService: Sendable {
     }
 
     /// Overlay `other` onto `self` (other wins) for `docker compose` multi-file
-    /// merge. Scalars take the later value when present; `environment` and
-    /// `labels` are field-merged (later wins on key collision); list-valued
-    /// fields are replaced by the later file unless it is empty.
+    /// merge, with compose-go's rules.
     func merged(with other: ComposeService) -> ComposeService {
         ComposeService(
             name: name,
             image: other.image ?? image,
-            build: other.build ?? build,
+            build: other.build.map { build?.merged(with: $0) ?? $0 } ?? build,
             command: other.command.isEmpty ? command : other.command,
             entrypoint: other.entrypoint.isEmpty ? entrypoint : other.entrypoint,
             environment: environment.merging(other.environment) { _, new in new },
-            ports: other.ports.isEmpty ? ports : other.ports,
-            volumes: other.volumes.isEmpty ? volumes : other.volumes,
-            networks: other.networks.isEmpty ? networks : other.networks,
-            networkAliases: other.networks.isEmpty ? networkAliases : other.networkAliases,
-            dependsOn: other.dependsOn.isEmpty ? dependsOn : other.dependsOn,
+            ports: Self.unique(ports + other.ports, by: Self.portKey),
+            volumes: Self.unique(volumes + other.volumes, by: Self.volumeKey),
+            networks: Self.unique(networks + other.networks) { $0 },
+            networkAliases: networkAliases.merging(other.networkAliases) {
+                Self.unique($0 + $1, by: Self.keyValueKey)
+            },
+            dependsOn: Self.unique(dependsOn + other.dependsOn) { $0 },
             restart: other.restart ?? restart,
             labels: labels.merging(other.labels) { _, new in new },
             hostname: other.hostname ?? hostname,
             containerName: other.containerName ?? containerName,
             workingDir: other.workingDir ?? workingDir,
-            configs: other.configs.isEmpty ? configs : other.configs,
-            secrets: other.secrets.isEmpty ? secrets : other.secrets,
-            profiles: other.profiles.isEmpty ? profiles : other.profiles,
-            dependsOnConditions: other.dependsOn.isEmpty ? dependsOnConditions : other.dependsOnConditions,
-            healthcheck: other.healthcheck ?? healthcheck,
+            configs: Self.unique(configs + other.configs) { $0.target ?? "/" + $0.source },
+            secrets: Self.unique(secrets + other.secrets) { $0.target ?? "/run/secrets/" + $0.source },
+            profiles: Self.unique(profiles + other.profiles, by: Self.keyValueKey),
+            dependsOnConditions: dependsOnConditions.merging(other.dependsOnConditions) { _, new in new },
+            healthcheck: other.healthcheck.map { healthcheck?.merged(with: $0) ?? $0 } ?? healthcheck,
             platform: other.platform ?? platform,
             user: other.user ?? user,
-            // compose-go appends a later file's entries, skipping ones already there.
-            tmpfs: other.tmpfs.reduce(into: tmpfs) { merged, entry in
-                if !merged.contains(entry) { merged.append(entry) }
-            },
+            tmpfs: Self.unique(tmpfs + other.tmpfs, by: Self.keyValueKey),
             memLimit: other.memLimit ?? memLimit,
             cpus: other.cpus ?? cpus,
             memReservation: other.memReservation ?? memReservation,
@@ -835,6 +832,54 @@ public struct ComposeService: Sendable {
             restartPolicyMaxAttempts: other.restartPolicyMaxAttempts ?? restartPolicyMaxAttempts,
             restartPolicyWindow: other.restartPolicyWindow ?? restartPolicyWindow
         )
+    }
+
+    /// compose-go's `uniqueEntries`: one entry per key, the last one, at the position of
+    /// the first.
+    static func unique<Entry>(_ entries: [Entry], by key: (Entry) -> String) -> [Entry] {
+        var unique: [Entry] = []
+        var positions: [String: Int] = [:]
+        for entry in entries {
+            let entryKey = key(entry)
+            if let position = positions[entryKey] {
+                unique[position] = entry
+            } else {
+                positions[entryKey] = unique.count
+                unique.append(entry)
+            }
+        }
+        return unique
+    }
+
+    /// compose-go's key for a port: host IP, published port, target port and protocol,
+    /// with its defaults, so `8080:80` and `0.0.0.0:8080:80/tcp` are one port.
+    static func portKey(_ spec: String) -> String {
+        let slash = spec.lastIndex(of: "/")
+        let proto = slash.map { spec[spec.index(after: $0)...].lowercased() } ?? "tcp"
+
+        // As in Docker's port parser, the IP is everything before the last two parts.
+        var parts = spec[..<(slash ?? spec.endIndex)]
+            .split(separator: ":", omittingEmptySubsequences: false)
+            .map(String.init)
+        let target = parts.removeLast()
+        let published = parts.popLast() ?? ""
+        let ip = parts.joined(separator: ":").trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+
+        let number = { (port: String) in Int(port).map(String.init) ?? port }
+        return "\(ip.isEmpty ? "0.0.0.0" : ip):\(number(published)):\(number(target))/\(proto)"
+    }
+
+    /// compose-go's key for a volume: its target, cleaned, so `data:/data` and
+    /// `other:/data/` mount at one place.
+    static func volumeKey(_ spec: String) -> String {
+        let target = (try? VolumeMount.parse(spec))?.destination ?? spec
+        return target.hasPrefix("/") ? URL(fileURLWithPath: target).standardized.path : target
+    }
+
+    /// compose-go's key for an entry of a list such as `tmpfs` or `profiles`: the text
+    /// before the first `=`.
+    static func keyValueKey(_ entry: String) -> String {
+        String(entry.prefix { $0 != "=" })
     }
 
     /// Decide how this service's image should be obtained, per the Compose spec.
@@ -920,7 +965,12 @@ public struct ComposeService: Sendable {
         return []
     }
 
+    /// The short form is compose-go's `service_started`, so a later file's short form
+    /// resets an earlier file's condition, as in Docker Compose.
     private static func parseDependsOnConditions(_ value: Any?) -> [String: String] {
+        if let list = value as? [String] {
+            return Dictionary(list.map { ($0, "service_started") }) { first, _ in first }
+        }
         guard let dict = value as? [String: Any] else { return [:] }
         return dict.compactMapValues { ($0 as? [String: Any])?["condition"] as? String }
     }
@@ -1045,7 +1095,13 @@ extension ComposeService: Encodable {
 
 /// Build configuration for a compose service.
 public struct ComposeBuild: Sendable, Equatable {
-    public var context: String
+    /// `context:` as the file sets it, nil for the default `.`. A later file's `build:`
+    /// overrides only the keys it sets, as compose-go merges it as a mapping.
+    var declaredContext: String?
+    public var context: String {
+        get { declaredContext ?? "." }
+        set { declaredContext = newValue }
+    }
     public var dockerfile: String?
     /// Target stage to build (maps to `container build --target <stage>`).
     public var target: String?
@@ -1053,15 +1109,24 @@ public struct ComposeBuild: Sendable, Equatable {
     public var args: [String: String]
 
     public init(
-        context: String,
+        context: String? = nil,
         dockerfile: String? = nil,
         target: String? = nil,
         args: [String: String] = [:]
     ) {
-        self.context = context
+        self.declaredContext = context
         self.dockerfile = dockerfile
         self.target = target
         self.args = args
+    }
+
+    func merged(with other: ComposeBuild) -> ComposeBuild {
+        ComposeBuild(
+            context: other.declaredContext ?? declaredContext,
+            dockerfile: other.dockerfile ?? dockerfile,
+            target: other.target ?? target,
+            args: args.merging(other.args) { _, new in new }
+        )
     }
 
     /// Build args formatted as `KEY=VALUE` strings for the `container build --build-arg` flag.
