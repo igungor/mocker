@@ -504,6 +504,32 @@ struct CLITests {
         #expect(command.command == ["ls", "-la"])
     }
 
+    @Test("Compose run hands its flags to the one-off container, -e NAME taking the value from the host")
+    func composeRunOptions() throws {
+        var command = try ComposeRun.parse([
+            "--rm", "-e", "A=1", "-e", "FROM_HOST", "-e", "UNSET", "-e", "EMPTY=", "-u", "root", "-w", "/src",
+            "-v", "./src:/src", "--publish", "9090:9090", "--service-ports", "-l", "k=v", "-l", "flag",
+            "--name", "one", "--entrypoint", "ls", "--build", "svc", "-la",
+        ])
+        try command.validate()
+
+        let options = command.runOptions(host: ["FROM_HOST": "host-value"])
+
+        #expect(options.command == ["-la"])
+        #expect(options.entrypoint == "ls")
+        #expect(options.environment == ["A": "1", "FROM_HOST": "host-value", "EMPTY": ""])
+        #expect(options.user == "root")
+        #expect(options.workingDir == "/src")
+        #expect(options.volumes == ["./src:/src"])
+        #expect(options.ports == ["9090:9090"])
+        #expect(options.servicePorts)
+        #expect(options.labels == ["k": "v", "flag": ""])
+        #expect(options.name == "one")
+        #expect(options.rm)
+        #expect(options.build)
+        #expect(!options.detach)
+    }
+
     @Test("Compose exec keeps STDIN open by default, as Docker Compose does")
     func composeExecKeepsStdinOpen() throws {
         #expect(try ComposeExec.parse(["svc", "cat"]).interactive)

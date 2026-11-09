@@ -22,6 +22,27 @@ public enum ComposeImageRemoval: String, Sendable, CaseIterable {
     case local
 }
 
+public struct ComposeRunOptions: Sendable {
+    public var command: [String] = []
+    public var entrypoint: String?
+    public var environment: [String: String] = [:]
+    public var user: String?
+    public var workingDir: String?
+    public var volumes: [String] = []
+    public var ports: [String] = []
+    /// Also publish the service's `ports:`, which `compose run` leaves out unless asked.
+    public var servicePorts = false
+    public var labels: [String: String] = [:]
+    public var name: String?
+    public var interactive = false
+    public var tty = false
+    public var detach = false
+    public var rm = false
+    public var build = false
+
+    public init() {}
+}
+
 /// Orchestrates multi-container deployments from a compose file.
 public actor ComposeOrchestrator {
     private let engine: ContainerEngine
@@ -68,92 +89,12 @@ public actor ComposeOrchestrator {
         waitTimeout: Int? = nil,
         timeout: Int? = nil
     ) async throws -> [ComposeEvent] {
-        var events: [ComposeEvent] = []
-
-        try composeFile.validateNetworkReferences()
-
-        // An external network is declared, not owned: the project joins it and must not
-        // start at all if it is missing, rather than silently running unconnected.
-        if composeFile.networks.values.contains(where: \.external) {
-            // Listed once: a failure here is a backend problem and must surface as itself,
-            // not as a misleading "your external network is missing".
-            let existing = Set(try await networkManager.list().map(\.name))
-            for network in composeFile.networks.values where network.external {
-                let name = network.runtimeName(projectName: projectName)
-                guard existing.contains(name) else {
-                    throw MockerError.operationFailed(
-                        "network \(name) declared as external, but could not be found")
-                }
-            }
-        }
-
-        // An unusable name, a missing external volume and a native volume that several
-        // services would attach at once have to fail here, before any network or service
-        // is created, rather than as a runtime error half-way through.
-        let shared = Self.sharedVolumes(composeFile: composeFile, projectName: projectName)
-        if !composeFile.volumes.isEmpty {
-            let existing = Set(try await volumeManager.list().map(\.name))
-            for volume in composeFile.volumes.values {
-                let name = volume.runtimeName(projectName: projectName)
-                let isDirectory = try volumeManager.directoryPath(name) != nil
-                if shared.contains(name) {
-                    guard isDirectory || !existing.contains(name) else {
-                        let fix = volume.external
-                            ? "mount it in one service only"
-                            : "copy its data out, then remove it (mocker volume rm \(name)) so it is recreated as a shared directory volume"
-                        throw MockerError.operationFailed(
-                            "volume \(name) is mounted by several services, but it is a native volume, which only one running container can attach; \(fix)")
-                    }
-                } else if !isDirectory && !volume.external {
-                    try VolumeManager.validateNewName(name)
-                }
-                guard !volume.external || existing.contains(name) else {
-                    throw MockerError.operationFailed(
-                        "volume \(name) declared as external, but could not be found")
-                }
-            }
-        }
-
-        // Create networks
-        for (fullName, driver) in Self.networksToCreate(composeFile: composeFile, projectName: projectName) {
-            do {
-                _ = try await networkManager.create(name: fullName, driver: driver)
-                events.append(.networkCreated(fullName))
-            } catch {
-                // Creation fails both when the network already exists and when the runtime
-                // rejects it (it has its own naming rules). Only the first is benign, and a
-                // service cannot join a network that does not exist — so keep the runtime's
-                // own diagnostic rather than replacing it with a generic one.
-                guard (try? await networkManager.inspect(fullName)) != nil else {
-                    throw error
-                }
-            }
-        }
-
-        // Create volumes. External volumes are declared, not owned — the project
-        // must use them as they are and never create (or later remove) them.
-        // A volume several services mount is a directory volume: a native one attaches to
-        // only one running container, since each container is its own VM.
-        var createdNativeVolumes: Set<String> = []
-        for (fullName, driver) in Self.volumesToCreate(composeFile: composeFile, projectName: projectName) {
-            do {
-                if shared.contains(fullName) {
-                    _ = try await volumeManager.createDirectory(name: fullName)
-                } else {
-                    _ = try await volumeManager.create(name: fullName, driver: driver)
-                    createdNativeVolumes.insert(fullName)
-                }
-                events.append(.volumeCreated(fullName))
-            } catch {
-                // Same rule as networks: only "it already exists" is benign.
-                guard (try? await volumeManager.inspect(fullName)) != nil else {
-                    throw error
-                }
-            }
-        }
+        let prepared = try await prepare(composeFile)
+        var events = prepared.events
+        let createdNativeVolumes = prepared.createdNativeVolumes
 
         let observed = (try? await engine.list(all: true))?
-            .filter { Self.belongs($0, toProject: projectName) }
+            .filter { Self.belongs($0, toProject: projectName) && !Self.isOneOff($0) }
             .map { container -> ObservedContainer in
                 ObservedContainer(
                     name: container.name,
@@ -286,6 +227,94 @@ public actor ComposeOrchestrator {
         }
 
         return events
+    }
+
+    private func prepare(_ composeFile: ComposeFile) async throws -> (events: [ComposeEvent], createdNativeVolumes: Set<String>) {
+        var events: [ComposeEvent] = []
+
+        try composeFile.validateNetworkReferences()
+
+        // An external network is declared, not owned: the project joins it and must not
+        // start at all if it is missing, rather than silently running unconnected.
+        if composeFile.networks.values.contains(where: \.external) {
+            // Listed once: a failure here is a backend problem and must surface as itself,
+            // not as a misleading "your external network is missing".
+            let existing = Set(try await networkManager.list().map(\.name))
+            for network in composeFile.networks.values where network.external {
+                let name = network.runtimeName(projectName: projectName)
+                guard existing.contains(name) else {
+                    throw MockerError.operationFailed(
+                        "network \(name) declared as external, but could not be found")
+                }
+            }
+        }
+
+        // An unusable name, a missing external volume and a native volume that several
+        // services would attach at once have to fail here, before any network or service
+        // is created, rather than as a runtime error half-way through.
+        let shared = Self.sharedVolumes(composeFile: composeFile, projectName: projectName)
+        if !composeFile.volumes.isEmpty {
+            let existing = Set(try await volumeManager.list().map(\.name))
+            for volume in composeFile.volumes.values {
+                let name = volume.runtimeName(projectName: projectName)
+                let isDirectory = try volumeManager.directoryPath(name) != nil
+                if shared.contains(name) {
+                    guard isDirectory || !existing.contains(name) else {
+                        let fix = volume.external
+                            ? "mount it in one service only"
+                            : "copy its data out, then remove it (mocker volume rm \(name)) so it is recreated as a shared directory volume"
+                        throw MockerError.operationFailed(
+                            "volume \(name) is mounted by several services, but it is a native volume, which only one running container can attach; \(fix)")
+                    }
+                } else if !isDirectory && !volume.external {
+                    try VolumeManager.validateNewName(name)
+                }
+                guard !volume.external || existing.contains(name) else {
+                    throw MockerError.operationFailed(
+                        "volume \(name) declared as external, but could not be found")
+                }
+            }
+        }
+
+        // Create networks
+        for (fullName, driver) in Self.networksToCreate(composeFile: composeFile, projectName: projectName) {
+            do {
+                _ = try await networkManager.create(name: fullName, driver: driver)
+                events.append(.networkCreated(fullName))
+            } catch {
+                // Creation fails both when the network already exists and when the runtime
+                // rejects it (it has its own naming rules). Only the first is benign, and a
+                // service cannot join a network that does not exist — so keep the runtime's
+                // own diagnostic rather than replacing it with a generic one.
+                guard (try? await networkManager.inspect(fullName)) != nil else {
+                    throw error
+                }
+            }
+        }
+
+        // Create volumes. External volumes are declared, not owned — the project
+        // must use them as they are and never create (or later remove) them.
+        // A volume several services mount is a directory volume: a native one attaches to
+        // only one running container, since each container is its own VM.
+        var createdNativeVolumes: Set<String> = []
+        for (fullName, driver) in Self.volumesToCreate(composeFile: composeFile, projectName: projectName) {
+            do {
+                if shared.contains(fullName) {
+                    _ = try await volumeManager.createDirectory(name: fullName)
+                } else {
+                    _ = try await volumeManager.create(name: fullName, driver: driver)
+                    createdNativeVolumes.insert(fullName)
+                }
+                events.append(.volumeCreated(fullName))
+            } catch {
+                // Same rule as networks: only "it already exists" is benign.
+                guard (try? await volumeManager.inspect(fullName)) != nil else {
+                    throw error
+                }
+            }
+        }
+
+        return (events, createdNativeVolumes)
     }
 
     /// Stop and remove all services.
@@ -898,6 +927,10 @@ public actor ComposeOrchestrator {
             .appendingPathComponent("hosts")
     }
 
+    public nonisolated func removeOneOffFiles(_ name: String) {
+        try? FileManager.default.removeItem(at: hostsFile(for: name).deletingLastPathComponent())
+    }
+
     /// What a service's hosts file lists: its own hostname, its service name and its
     /// aliases, since Docker's DNS answers a container for all of them, then the others.
     nonisolated static func hostsEntries(
@@ -1023,10 +1056,11 @@ public actor ComposeOrchestrator {
         return file
     }
 
-    /// Running containers that have an address, with their service.
+    /// Running containers that have an address, with their service. A `compose run`
+    /// container is left out, as Docker's DNS doesn't answer it for the service.
     private func runningServices() async throws -> [(service: String, info: ContainerInfo)] {
         try await ps().compactMap { container in
-            guard container.state.isActive, !container.networkAddress.isEmpty,
+            guard container.state.isActive, !container.networkAddress.isEmpty, !Self.isOneOff(container),
                   let service = container.labels["com.mocker.compose.service"] else { return nil }
             return (service, container)
         }
@@ -1035,22 +1069,24 @@ public actor ComposeOrchestrator {
     private func writeHostsFileBeforeStart(
         _ service: ComposeService,
         containerName: String,
-        composeFile: ComposeFile
+        composeFile: ComposeFile,
+        oneOff: String? = nil
     ) async throws -> URL {
         let hostname = service.hostname ?? containerName
         let others = Self.namedAddresses(
-            of: try await runningServices().filter { $0.service != service.name },
+            of: try await runningServices().filter { oneOff != nil || $0.service != service.name },
             composeFile: composeFile
         )
+        // As in Docker, a one-off container doesn't answer for the service or its aliases.
         let entries = Self.hostsEntries(
-            service: service.name,
+            service: oneOff ?? service.name,
             hostname: hostname,
             address: Self.placeholderAddress,
-            aliases: Self.aliases(of: service.name, composeFile: composeFile),
+            aliases: oneOff == nil ? Self.aliases(of: service.name, composeFile: composeFile) : [],
             others: others
         )
         return try writeHostsFile(
-            for: service.name, entries: entries, managed: Self.managedHostNames(composeFile).union([hostname]), fresh: true)
+            for: oneOff ?? service.name, entries: entries, managed: Self.managedHostNames(composeFile).union([hostname]), fresh: true)
     }
 
     /// Update every running container's hosts file with its own name and the others'.
@@ -1122,9 +1158,10 @@ public actor ComposeOrchestrator {
     private func containerConfig(
         for service: ComposeService,
         composeFile: ComposeFile = ComposeFile(),
-        detach: Bool
+        detach: Bool,
+        oneOff: String? = nil
     ) async throws -> ContainerConfig {
-        let containerName = service.runtimeName(projectName: projectName)
+        let containerName = oneOff ?? service.runtimeName(projectName: projectName)
 
         // Resolved once: it is both what the container joins and what is recorded on it,
         // so a later change to the network is visible to the reconcile.
@@ -1154,7 +1191,8 @@ public actor ComposeOrchestrator {
             }
         ) + fileObjectMounts(for: service, composeFile: composeFile)
             + [VolumeMount(
-                source: try await writeHostsFileBeforeStart(service, containerName: containerName, composeFile: composeFile).path,
+                source: try await writeHostsFileBeforeStart(
+                    service, containerName: containerName, composeFile: composeFile, oneOff: oneOff).path,
                 destination: "/etc/hosts")]
 
         // Docker's exec model concatenates entrypoint + command into one argv.
@@ -1208,6 +1246,81 @@ public actor ComposeOrchestrator {
         )
 
         return config
+    }
+
+    public func oneOffConfig(
+        for serviceName: String,
+        composeFile: ComposeFile,
+        options: ComposeRunOptions
+    ) async throws -> ContainerConfig {
+        guard let service = composeFile.services[serviceName] else {
+            throw MockerError.operationFailed("no such service: \(serviceName)")
+        }
+
+        let created = try await prepare(composeFile).createdNativeVolumes
+        try await ensureImage(for: service, forceBuild: options.build, noBuild: false)
+        await seed(
+            Self.volumeSeeds(for: service, composeFile: composeFile, projectName: projectName, created: created),
+            from: service)
+
+        let name = options.name ?? Self.oneOffName(service: serviceName, projectName: projectName)
+        let base = try await containerConfig(for: service, composeFile: composeFile, detach: options.detach, oneOff: name)
+        let volumes = try Self.resolveVolumeMounts(
+            options.volumes,
+            projectDir: projectDir,
+            namedVolumeSources: composeFile.volumes.mapValues {
+                try volumeManager.composeSource($0.runtimeName(projectName: projectName))
+            }
+        )
+
+        return try Self.oneOffConfig(base, service: service, options: options, volumes: volumes, projectName: projectName)
+    }
+
+    nonisolated static func oneOffConfig(
+        _ base: ContainerConfig,
+        service: ComposeService,
+        options: ComposeRunOptions,
+        volumes: [VolumeMount],
+        projectName: String
+    ) throws -> ContainerConfig {
+        var config = base
+
+        let entrypoint = options.entrypoint.map { $0.split(separator: " ").map(String.init) } ?? service.entrypoint
+        let exec = resolveExec(entrypoint: entrypoint, command: options.command.isEmpty ? service.command : options.command)
+        config.entrypoint = exec.entrypoint
+        config.command = exec.command
+
+        config.environment.merge(options.environment) { _, new in new }
+        config.user = options.user ?? base.user
+        config.workingDir = options.workingDir ?? base.workingDir
+
+        // As in Docker, a `-v` replaces the service's mount at the same path.
+        let destinations = Set(volumes.map(\.destination))
+        config.volumes = base.volumes.filter { !destinations.contains($0.destination) } + volumes
+        config.ports = (options.servicePorts ? base.ports : []) + (try options.ports.map { try PortMapping.parse($0) })
+
+        config.labels = service.labels.merging(options.labels) { _, new in new }.merging([
+            "com.mocker.compose.project": projectName,
+            "com.mocker.compose.service": service.name,
+            "com.mocker.compose.oneoff": "True",
+        ]) { _, new in new }
+
+        config.restartPolicy = .no
+        config.interactive = options.interactive
+        config.tty = options.tty
+        config.detach = options.detach
+        config.rm = options.rm
+        return config
+    }
+
+    /// Docker Compose's name for a `compose run` container.
+    nonisolated static func oneOffName(service: String, projectName: String) -> String {
+        let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(12)
+        return "\(projectName)-\(service)-run-\(id)"
+    }
+
+    nonisolated static func isOneOff(_ container: ContainerInfo) -> Bool {
+        container.labels["com.mocker.compose.oneoff"] == "True"
     }
 
     /// Configs and secrets, which Docker Compose mounts the same way.
