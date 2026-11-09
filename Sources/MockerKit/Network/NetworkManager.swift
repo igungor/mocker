@@ -9,15 +9,20 @@ import Foundation
 public actor NetworkManager {
     private let runner: ProcessRunning
     private let cli: String
+    private let probe: NetworkSharingProbe
+    private let patience: Duration
 
     public init(
         config: MockerConfig = MockerConfig(),
         runner: ProcessRunning = RealProcessRunner(),
-        cli: String = CLIResolver.resolve()
+        cli: String = CLIResolver.resolve(),
+        patience: Duration = .seconds(20)
     ) throws {
         _ = config
         self.runner = runner
         self.cli = cli
+        self.probe = NetworkSharingProbe(runner: runner)
+        self.patience = patience
     }
 
     /// Create a new network.
@@ -47,12 +52,39 @@ public actor NetworkManager {
         if let subnet, !subnet.isEmpty { arguments += ["--subnet", subnet] }
         arguments.append(name)
 
-        let (output, status) = try await runner.run(executable: cli, arguments: arguments)
+        let (output, status) = try await runNeedingNetworkSharing(arguments)
         guard status == 0 else {
             throw MockerError.operationFailed(Self.errorMessage(from: output, fallback: "failed to create network \(name)"))
         }
         // Read the created network back so callers see the subnet the backend assigned.
         return try await inspect(name)
+    }
+
+    private func runNeedingNetworkSharing(_ arguments: [String]) async throws -> (String, Int32) {
+        let started = Date()
+        let (events, continuation) = AsyncStream.makeStream(of: Bool.self)
+
+        let command = Task { [runner, cli] in
+            defer { continuation.yield(true) }
+
+            return try await runner.run(executable: cli, arguments: arguments)
+        }
+        let timer = Task { [patience] in
+            try? await Task.sleep(for: patience)
+            continuation.yield(false)
+        }
+
+        var iterator = events.makeAsyncIterator()
+        let finished = await iterator.next() ?? true
+        timer.cancel()
+        continuation.finish()
+
+        if !finished, await probe.isSilent(since: started) {
+            let rtadvd = await probe.stuckRouterAdvertiser()
+            throw MockerError.operationFailed(NetworkSharingProbe.hangMessage(rtadvd: rtadvd))
+        }
+
+        return try await command.value
     }
 
     /// List all networks.

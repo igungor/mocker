@@ -293,6 +293,12 @@ struct ComposeUp: AsyncParsableCommand {
 
         try config.ensureDirectories()
 
+        // A stuck rtadvd hangs InternetSharing at the next network change, which `up`
+        // is about to make: fail now with the way out rather than hang half-way through.
+        if let rtadvd = await NetworkSharingProbe().stuckRouterAdvertiser() {
+            throw MockerError.operationFailed(NetworkSharingProbe.hangMessage(rtadvd: rtadvd))
+        }
+
         let engine = try ContainerEngine(config: config)
         let imageManager = try ImageManager(config: config)
         let networkManager = try NetworkManager(config: config)
