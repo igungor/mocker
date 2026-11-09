@@ -1142,7 +1142,6 @@ struct ComposeRun: AsyncParsableCommand {
         }
     }
 
-    /// The flags, for `ComposeOrchestrator.oneOffConfig`.
     /// - Parameter host: where `-e NAME` without a value takes it from, as in Docker.
     func runOptions(host: [String: String]) -> ComposeRunOptions {
         var run = ComposeRunOptions()

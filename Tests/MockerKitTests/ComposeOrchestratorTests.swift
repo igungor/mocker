@@ -212,9 +212,6 @@ struct ComposeOrchestratorTests {
         #expect(ComposeOrchestrator.servicesAwaitedForCompletion(compose) == ["migrate"])
     }
 
-    // MARK: - compose run
-
-    /// The service's container config, as `containerConfig` makes it for `up`.
     private static func serviceContainer(_ service: ComposeService) -> ContainerConfig {
         let exec = ComposeOrchestrator.resolveExec(entrypoint: service.entrypoint, command: service.command)
         return ContainerConfig(

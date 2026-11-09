@@ -22,17 +22,12 @@ public enum ComposeImageRemoval: String, Sendable, CaseIterable {
     case local
 }
 
-/// What `compose run`'s flags change on the service's container.
 public struct ComposeRunOptions: Sendable {
-    /// Replaces the service's `command:`.
     public var command: [String] = []
-    /// Replaces the service's `entrypoint:`, split on spaces as a string one is.
     public var entrypoint: String?
-    /// Added to the service's `environment:`.
     public var environment: [String: String] = [:]
     public var user: String?
     public var workingDir: String?
-    /// Mounted on top of the service's `volumes:`, in the same syntax.
     public var volumes: [String] = []
     public var ports: [String] = []
     /// Also publish the service's `ports:`, which `compose run` leaves out unless asked.
@@ -43,7 +38,6 @@ public struct ComposeRunOptions: Sendable {
     public var tty = false
     public var detach = false
     public var rm = false
-    /// Build the image even if it exists.
     public var build = false
 
     public init() {}
@@ -99,7 +93,6 @@ public actor ComposeOrchestrator {
         var events = prepared.events
         let createdNativeVolumes = prepared.createdNativeVolumes
 
-        // A `compose run` container is not the service's, so it is never kept or replaced.
         let observed = (try? await engine.list(all: true))?
             .filter { Self.belongs($0, toProject: projectName) && !Self.isOneOff($0) }
             .map { container -> ObservedContainer in
@@ -236,8 +229,6 @@ public actor ComposeOrchestrator {
         return events
     }
 
-    /// Check the project's networks and volumes, and create the missing ones.
-    /// - Returns: what was created, and which of the volumes are new native ones.
     private func prepare(_ composeFile: ComposeFile) async throws -> (events: [ComposeEvent], createdNativeVolumes: Set<String>) {
         var events: [ComposeEvent] = []
 
@@ -936,7 +927,6 @@ public actor ComposeOrchestrator {
             .appendingPathComponent("hosts")
     }
 
-    /// Remove the hosts file of a `compose run` container that is gone.
     public nonisolated func removeOneOffFiles(_ name: String) {
         try? FileManager.default.removeItem(at: hostsFile(for: name).deletingLastPathComponent())
     }
@@ -1076,9 +1066,6 @@ public actor ComposeOrchestrator {
         }
     }
 
-    /// The hosts file a new container starts with: every running service but its own.
-    /// - Parameter oneOff: the name of a `compose run` container, which gets a file of its
-    ///   own, so the service's container keeps its, and also finds the service.
     private func writeHostsFileBeforeStart(
         _ service: ComposeService,
         containerName: String,
@@ -1168,7 +1155,6 @@ public actor ComposeOrchestrator {
     }
 
     /// The config the service's container runs with. Its image must exist.
-    /// - Parameter oneOff: the name of a `compose run` container to make instead.
     private func containerConfig(
         for service: ComposeService,
         composeFile: ComposeFile = ComposeFile(),
@@ -1262,10 +1248,6 @@ public actor ComposeOrchestrator {
         return config
     }
 
-    /// The container `compose run` starts, as Docker Compose makes it: the service's own
-    /// config with `options` on top, but with the service's ports only when asked, and
-    /// never restarted. The project's networks and volumes are created first, and the
-    /// image pulled or built, as for `up`.
     public func oneOffConfig(
         for serviceName: String,
         composeFile: ComposeFile,
@@ -1294,8 +1276,6 @@ public actor ComposeOrchestrator {
         return try Self.oneOffConfig(base, service: service, options: options, volumes: volumes, projectName: projectName)
     }
 
-    /// `compose run`'s flags applied to `base`, the config of the service's own container.
-    /// - Parameter volumes: `options.volumes`, resolved.
     nonisolated static func oneOffConfig(
         _ base: ContainerConfig,
         service: ComposeService,
@@ -1314,12 +1294,11 @@ public actor ComposeOrchestrator {
         config.user = options.user ?? base.user
         config.workingDir = options.workingDir ?? base.workingDir
 
-        // A `-v` replaces the service's mount at the same path.
+        // As in Docker, a `-v` replaces the service's mount at the same path.
         let destinations = Set(volumes.map(\.destination))
         config.volumes = base.volumes.filter { !destinations.contains($0.destination) } + volumes
         config.ports = (options.servicePorts ? base.ports : []) + (try options.ports.map { try PortMapping.parse($0) })
 
-        // No config hash: `up` neither keeps nor replaces it.
         config.labels = service.labels.merging(options.labels) { _, new in new }.merging([
             "com.mocker.compose.project": projectName,
             "com.mocker.compose.service": service.name,
